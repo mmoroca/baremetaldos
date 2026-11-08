@@ -569,7 +569,8 @@ a bug report.
 ```
 Makefile                  build, checks and card goals
 DOSBOX_REV                the pinned DOSBox-core revision
-LICENSE                   GPL-3.0, with the combined-work notice
+LICENSE                   the GPL-3.0 text, verbatim and unmodified
+NOTICE                    copyright, why GPL-3.0, combined work, acknowledgements
 README.md                 this file
 README.es.md              the same, in Spanish
 src/kernel.cpp            the Circle application and the frame loop
@@ -592,8 +593,9 @@ sd/                       the files that go on the card, as they ship
 A more permissive licence is not available for the image, and not by choice: the
 kernel statically links Circle (GPL-3.0) and DOSBox-core (GPL-2.0-or-later), so
 the combined binary must be GPL-3.0 and, if it is distributed, its source must be
-available. This repository is that source. `LICENSE` explains the reasoning in
-full, and lists the licence of every component that ends up in the image.
+available. This repository is that source. `NOTICE` has the copyright line, the
+reasoning, and the licence of every component that ends up in the image;
+`LICENSE` is the verbatim GPL-3.0 text, nothing else.
 
 ## Credits
 

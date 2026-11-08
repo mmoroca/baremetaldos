@@ -570,7 +570,8 @@ panel en cualquier informe.
 ```
 Makefile                  compilación, checks y objetivos de tarjeta
 DOSBOX_REV                la revisión fijada de DOSBox-core
-LICENSE                   GPL-3.0, con el aviso de obra combinada
+LICENSE                   el texto de la GPL-3.0, literal y sin modificar
+NOTICE                    copyright, por qué GPL-3.0, obra combinada, agradecimientos
 README.md                 el README principal (inglés)
 README.es.md              este mismo documento, en español
 src/kernel.cpp            la aplicación Circle y el bucle de frames
@@ -592,9 +593,9 @@ sd/                       los ficheros que van a la tarjeta, tal como se entrega
 Una licencia más permisiva no está disponible para la imagen, y no por elección: el
 núcleo enlaza estáticamente Circle (GPL-3.0) y DOSBox-core (GPL-2.0-o-posterior),
 así que el binario combinado tiene que ser GPL-3.0 y, si se distribuye, su código
-fuente tiene que estar disponible. Este repositorio es ese código. `LICENSE`
-explica el razonamiento completo y enumera la licencia de cada componente que acaba
-en la imagen.
+fuente tiene que estar disponible. Este repositorio es ese código. `NOTICE` tiene
+la línea de copyright, el razonamiento y la licencia de cada componente que acaba en
+la imagen; `LICENSE` es el texto literal de la GPL-3.0, y nada más.
 
 ## Créditos
 
