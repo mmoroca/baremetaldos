@@ -13,8 +13,7 @@ third_party/
 sdcard/
 
 # the Arm toolchain, unpacked by scripts/setup.sh.  It lives here on purpose
-# (self-contained tree) and must never be deleted by a sync from the workspace:
-# see the rsync excludes in docs/ACTUALIZAR.md.
+# (self-contained tree), so it is not something a clone has to install.
 opt/
 
 # python bytecode from the check generators

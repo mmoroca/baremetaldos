@@ -79,11 +79,10 @@ frame buffer and the emulator's memory come out of the same pool.
 
 Beyond the board:
 
-* A microSD card, 2 GB or more, FAT32, single partition. **After the card is
-  written it is plain FAT32**, so games, `dosbox.conf` and `boot.conf` can be
-  edited from any computer - Windows, macOS or Linux - with no special tools. The
-  Linux host is only needed to *build* the kernel and *write* the card the first
-  time.
+* A microSD card, 2 GB or more, FAT32, single partition. **Once written, the card
+  is plain FAT32**, so games, `dosbox.conf` and `boot.conf` can be edited from any
+  computer - Windows, macOS or Linux - with no special tools. The Linux host is
+  only needed to *build* the kernel and to *write* the card the first time.
 * An HDMI display and a USB keyboard. A mouse and a gamepad are optional.
 * No fan required: the governor keeps the SoC at 600 MHz whenever nothing is
   being emulated.
