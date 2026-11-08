@@ -1,0 +1,86 @@
+#
+# config.txt - BM-DOS
+#
+# Based on Circle's boot/config64.txt.  The firmware reads this before the
+# emulator runs; it is not a Circle application file.
+#
+# Note that this file selects the kernel per Raspberry Pi model, so a single
+# card can carry a Pi 3, 4 and 5 build at once if you copy all three images.
+#
+
+# 64-bit mode.  Circle's AArch64 port needs this and the kernel load address.
+arm_64bit=1
+kernel_address=0x80000
+initial_turbo=0
+
+# Keep the GPU footprint small: the emulator is CPU bound and we only need a
+# framebuffer, not 3D or codecs.  64 MB is plenty for 1080p and leaves the rest
+# of the RAM to DOSBox.
+gpu_mem=64
+
+# HDMI: force a mode instead of letting the firmware pick, so the frame buffer
+# Circle allocates always matches what the display does.  1920x1080@60 is the
+# safest choice for a TV or a modern monitor.  Change both lines together with
+# DisplayWidth/DisplayHeight in src/kernel.cpp.
+hdmi_group=1
+hdmi_mode=16
+hdmi_drive=2
+
+# Sound.  The emulator drives the SoC's audio hardware directly (Circle's HDMI
+# or PWM device), so the firmware needs the audio subsystem enabled - that is
+# what dtparam=audio=on does - but it is *not* the firmware that plays anything.
+#
+# If the display has speakers and the panel says "audio HDMI", the two lines
+# that matter are the HDMI ones: hdmi_drive=2 is what tells the firmware to
+# send audio over HDMI (drive=1 is DVI, video only).  It is already set above.
+#
+# If there is no sound over HDMI but there is over the jack, that is the
+# display, not the port: run "make AUDIO_DEVICE=pwm" and the port will open the
+# 3.5 mm jack instead.
+dtparam=audio=on
+
+# CPU frequency: nothing is set here on purpose.
+#
+# The port's own governor sets the ARM clock rate at run time, from 600 MHz at
+# the DOS prompt up to the rate the emulator actually needs (see
+# src/platform/bare_sysinfo.cpp).  Pinning arm_freq here would take that decision
+# away from it - the firmware would report a maximum equal to the pinned value
+# and tie every level to the same number.
+#
+# If your board is unstable and you want it slower, *that* is when to put a line
+# here, e.g. arm_freq=1500, and the governor will build its levels inside
+# whatever range the firmware then reports.
+
+# Two frame buffers on the Pi 4/5: Circle uses the second one for page flipping,
+# which is what makes the scaling tear free.
+max_framebuffers=2
+
+[pi02]
+kernel=kernel8.img
+
+[pi2]
+kernel=kernel8.img
+
+[pi3]
+kernel=kernel8.img
+
+[pi3+]
+kernel=kernel8.img
+
+[pi4]
+# The Circle ARM stub is required for FIQ support on a Pi 4.  Build it with
+#   make -C third_party/circle-stdlib/libs/circle/boot armstub64
+# and copy armstub8-rpi4.bin next to this file.  If you skip it, remove the
+# armstub line - the port does not use FIQ, but Circle's default config for
+# the Pi 4 expects the file to exist.
+armstub=armstub8-rpi4.bin
+kernel=kernel8-rpi4.img
+max_framebuffers=2
+
+[cm4]
+otg_mode=1
+
+[pi5]
+kernel=kernel_2712.img
+#framebuffer_depth=32
+#framebuffer_ignore_alpha=1

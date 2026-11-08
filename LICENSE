@@ -1,0 +1,79 @@
+BM-DOS - DOSBox on bare metal Raspberry Pi
+Copyright (C) 2026  @mmoroca & arena.ai  (https://arena.ai)
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+--------------------------------------------------------------------------
+Why GPL-3.0, and not something more permissive
+--------------------------------------------------------------------------
+
+The licence of this port is not a preference, and the reason is worth stating
+because it is the question everybody asks first.
+
+A more permissive licence (MIT, BSD, Apache-2.0) would be the natural choice for
+this code, and it cannot be used here for two independent reasons:
+
+  1. The kernel image statically links Circle, which is GPL-3.0.  A distributed
+     binary is a derivative work of everything linked into it, so the image as a
+     whole must be GPL-3.0 regardless of what this port's own files say.
+
+  2. The image also links DOSBox-core, which is GPL-2.0 *or later*.  The
+     "or later" is what allows combining it with GPL-3.0 code at all: the core is
+     taken under GPL-3.0 for the purposes of this combination, and the result
+     stays GPL-3.0.
+
+The practical consequence, and it is the one that matters for the repository:
+**if a kernel image is distributed, the corresponding source must be available.**
+This repository is that source.  Publishing a binary without it would be a
+licence violation, not a choice.
+
+Everything in the combined-work notice below is a property of the build, not of
+this port's files.
+
+--------------------------------------------------------------------------
+Combined work notice
+--------------------------------------------------------------------------
+
+The kernel image produced by this build statically links:
+
+  * Circle            - GPL-3.0  (C) R. Stange
+  * circle-stdlib     - GPL-3.0  (C) Stephan Muehlstrasser
+  * newlib            - BSD-style licences, see newlib's COPYING
+  * libc++            - Apache-2.0 with LLVM exceptions
+  * DOSBox-core       - GPL-2.0 or later  (C) The DOSBox Team,
+                        (C) Nikos Chantziaras
+
+Because Circle (GPL-3.0) and DOSBox-core (GPL-2.0-or-later) are combined into a
+single binary, the resulting image as a whole is distributed under the terms of
+the GNU GPL version 3 (the GPL-2.0-or-later option in DOSBox-core's licence is
+what makes that combination possible).
+
+Files in this repository that come from those projects keep their own headers
+and their own copyright.  In particular sd/config.txt and sd/cmdline.txt follow
+Circle's conventions, and sd/dosbox.conf is a configuration file for DOSBox-core.
+
+Acknowledgements, and where the idea came from:
+
+  * Inspired by the work of @rtomasa on Pi-DOS
+    (https://github.com/rtomasa/Pi-DOS), a DOSBox for the Raspberry Pi running
+    under Linux.
+  * And by the challenge proposed by @shaeon (https://github.com/shaeon),
+    author of ZXMetalCircle (https://github.com/shaeon/ZXMetalCircle).
+
+No code is copied from either project.  What they gave this one is the idea that
+a Raspberry Pi can run a whole computer's worth of software with no operating
+system underneath, and the reason to try it with DOSBox.
+
+The full text of the GNU General Public License version 3 is available at
+https://www.gnu.org/licenses/gpl-3.0.txt

@@ -1,0 +1,7 @@
+# Cabeceras simuladas de Circle para compilar los ficheros de plataforma con el
+# compilador del host.  Las escribe setup.sh; se pueden borrar y regenerar.
+circle/
+
+# Salida de gen-dynarec.py para el test del cruce de 512 MB (se regenera en
+# cada `make check-dynarec`); no se versiona.
+dynarec_cross.inc

@@ -1,0 +1,33 @@
+# build output
+build/
+*.o
+*.d
+*.elf
+*.img
+*.lst
+*.map
+*.hex
+
+# fetched sources and toolchain-side build tree
+third_party/
+sdcard/
+
+# the Arm toolchain, unpacked by scripts/setup.sh.  It lives here on purpose
+# (self-contained tree) and must never be deleted by a sync from the workspace:
+# see the rsync excludes in docs/ACTUALIZAR.md.
+opt/
+
+# python bytecode from the check generators
+__pycache__/
+*.pyc
+
+# editor noise
+*~
+.vscode/
+
+# Internal working notes and the engineering log.  They are kept out of the
+# published repository on purpose: they are a diary, not documentation, and the
+# two READMEs are written for readers who are not the person writing this.
+docs/
+AGENTS.md
+NOTAS-TECNICAS.md
