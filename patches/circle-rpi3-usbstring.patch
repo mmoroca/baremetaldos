@@ -1,0 +1,17 @@
+--- a/lib/usb/usbstring.cpp
++++ b/lib/usb/usbstring.cpp
+@@ -127,7 +127,13 @@
+ 	}
+ 
+ 	// convert into ASCII string
+-	assert (m_pUSBString->bLength > 2);
++	// An empty string descriptor (bLength == 2) is legal and the check above
++	// already accepts it.  Treat it as "no name", which is what the caller
++	// does with a string it cannot read, instead of aborting the whole system.
++	if (m_pUSBString->bLength <= 2)
++	{
++		return FALSE;
++	}
+ 	assert ((m_pUSBString->bLength & 1) == 0);
+ 	size_t nLength = (m_pUSBString->bLength-2) / 2;
+ 

@@ -545,9 +545,12 @@ puede mirar no es un check que pasa.
 superior; ver [Entorno de compilación](#entorno-de-compilación). `make version` dice
 qué compilador está usando el build.
 
-**Un juego va demasiado lento.** Es la CPU emulada, no el port. Prueba
-`core = dynamic` en `dosbox.conf`, o baja `cycles`; a un juego que espera un 386 no
-le ayudan 23880 ciclos y sí le perjudica que el audio se quede atrás.
+**Un juego va demasiado lento.** Es la CPU emulada, no el port. Los ciclos los
+responde el port, no se leen de `dosbox.conf` (el core reescribe esa variable
+desde su tabla de opciones durante el arranque), así que cambiar `cycles` ahí no
+hace nada. Si el panel muestra el reloj cayendo a 600 MHz mientras el juego sigue
+pidiendo fotogramas, eso es otro fallo: ver
+[la nota sobre el reloj en una Pi 3](#el-reloj-en-una-pi-3).
 
 **La imagen no llena la pantalla.** Es la relación de aspecto respetándose. Un modo
 320x200 es 4:3 en el hardware original, y estirarlo a 16:9 está mal. Usa
@@ -582,6 +585,7 @@ src/dosbox-stub/          los pocos símbolos POSIX y MIDI que DOSBox necesita y
                           que el port tiene que aportar
 scripts/                  puesta a punto, compilación, tarjetas, checks del host
 sd/                       los ficheros que van a la tarjeta, tal como se entregan
+patches/                  arreglos para código de terceros, aplicados a mano (ver abajo)
 ```
 
 `third_party/`, `build/`, `opt/` y `sdcard/` se generan y están en `.gitignore`.
@@ -608,6 +612,45 @@ la imagen; `LICENSE` es el texto literal de la GPL-3.0, y nada más.
   <https://github.com/smuehlst/circle-stdlib>
 * Todo lo escrito para este port - **@mmoroca** y [arena.ai](https://arena.ai),
   2026.
+
+### El reloj en una Pi 3
+
+En una Pi 3 el reloj ARM lo manda el firmware: 600 MHz, 1200 MHz y 1,4 GHz son sus
+escalones, y se mueve entre ellos por su cuenta. El port pide una frecuencia y el
+firmware puede conceder otra: el panel muestra lo que el reloj *es*, no lo que se
+pidió. Si marca 600 MHz mientras el emulador está claramente ocupado, el juego va
+a la velocidad que permite el reloj y el sonido se entrecorta.
+
+El veto térmico del governor no es la causa cuando el panel marca 60 °C o menos:
+empieza a 80 °C, y `socmaxtemp=` en `cmdline.txt` sólo puede *bajarlo* (el rango
+aceptado es 40-78). Poner `cpu_max_mhz` en `boot.conf` elimina el escalón entre
+los niveles del governor, lo que hace el fallo más fácil de ver, pero no lo
+arregla.
+
+### Parches de Circle, aplicados a mano
+
+`patches/` contiene arreglos para código de terceros. No los aplica la
+compilación: tocan un árbol que clona `scripts/setup.sh`, y `make distclean` o un
+clon nuevo los pierde.
+
+`patches/circle-rpi3-usbstring.patch` arregla un aborto de Circle en la Pi 3. En
+una Pi 3 `CUSBString::GetFromDescriptor()` pide un descriptor de cadena de 4 bytes,
+y un dispositivo USB que responde con uno vacío (legal, y aceptado por la
+comprobación de justo arriba) hace saltar `assert (m_pUSBString->bLength > 2)` en
+`lib/usb/usbstring.cpp`, que detiene el sistema entero: un `assertion failed` en
+rojo en pantalla tras la enumeración de dispositivos. Esa rama sólo existe para
+`RASPPI <= 3`, así que una Pi 4 no la ejecuta nunca. El parche convierte la
+aserción en la respuesta «sin nombre» que el llamante ya sabe manejar.
+
+```bash
+cd third_party/circle-stdlib/libs/circle
+git apply --check /ruta/a/baremetaldos/patches/circle-rpi3-usbstring.patch
+git apply         /ruta/a/baremetaldos/patches/circle-rpi3-usbstring.patch
+cd ../.. && make -j"$(nproc)"      # recompila sólo Circle; libc++ se reutiliza
+cd ../.. && make -j"$(nproc)"      # reenlaza kernel8.img
+```
+
+El parche se aplica a Circle Step51.1.1, la revisión que trae circle-stdlib hoy.
 
 ## Agradecimientos
 

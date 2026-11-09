@@ -543,10 +543,12 @@ look is not a check that passes.
 newer; see [Build environment](#build-environment). `make version` prints which
 compiler the build is using.
 
-**A game is too slow.** That is the emulated CPU, not the port. Try
-`core = dynamic` in `dosbox.conf`, or a lower `cycles` value; a game that expects
-a 386 will not be helped by 23880 cycles and will be hurt by the audio falling
-behind.
+**A game is too slow.** That is the emulated CPU, not the port. The cycle count is
+answered by the port, not read from `dosbox.conf` - the core rewrites that
+variable from its option table during start-up - so editing `cycles` there
+changes nothing. If the panel shows the clock dropping to 600 MHz while the game
+is still asking for frames, that is a separate fault: see
+[the note on the Pi 3 clock](#the-clock-on-a-pi-3).
 
 **The picture does not fill the screen.** That is the aspect ratio being
 respected. A 320x200 mode is 4:3 on real hardware, and stretching it to 16:9 is
@@ -581,6 +583,7 @@ src/dosbox-stub/          the few POSIX and MIDI symbols DOSBox needs and the po
                           has to supply
 scripts/                  setup, build, card writing, host checks
 sd/                       the files that go on the card, as they ship
+patches/                  fixes for upstream code, applied by hand (see below)
 ```
 
 `third_party/`, `build/`, `opt/` and `sdcard/` are generated and are in
@@ -607,6 +610,46 @@ reasoning, and the licence of every component that ends up in the image;
 * **circle-stdlib** - Stephan Muehlstrasser. <https://github.com/smuehlst/circle-stdlib>
 * Everything written for this port - **@mmoroca** & [arena.ai](https://arena.ai),
   2026.
+
+### The clock on a Pi 3
+
+On a Pi 3 the firmware owns the ARM clock: 600 MHz, 1200 MHz and 1.4 GHz are its
+own steps, and it moves between them by itself. The port asks for a rate and the
+firmware may grant something else - the panel shows what the clock *is*, not what
+was asked for. If it reads 600 MHz while the emulator is clearly busy, the game
+runs at about the rate the clock allows and the sound stutters.
+
+The governor's own thermal veto is not the cause when the panel shows 60 C or
+less: it starts at 80 C, and `socmaxtemp=` in `cmdline.txt` can only *lower* that
+(the accepted range is 40-78). Setting `cpu_max_mhz` in `boot.conf` removes the
+gap between the governor's levels, which makes the fault easier to see but does
+not fix it.
+
+### Circle patches, applied by hand
+
+`patches/` holds fixes for upstream code. They are not applied by the build: they
+touch a tree that is cloned by `scripts/setup.sh`, and `make distclean` or a new
+clone loses them.
+
+`patches/circle-rpi3-usbstring.patch` fixes a Circle abort on the Pi 3. On a Pi 3
+`CUSBString::GetFromDescriptor()` asks for a 4-byte string descriptor, and a USB
+device that answers with an empty one (valid, and accepted by the check just
+above) then fails `assert (m_pUSBString->bLength > 2)` in
+`lib/usb/usbstring.cpp`, which halts the whole system - a red
+`assertion failed` on screen after the device enumeration. The code path only
+exists for `RASPPI <= 3`, so a Pi 4 never runs it. The patch turns the assertion
+into the "no name" answer the caller already handles.
+
+```bash
+cd third_party/circle-stdlib/libs/circle
+git apply --check /path/to/baremetaldos/patches/circle-rpi3-usbstring.patch
+git apply         /path/to/baremetaldos/patches/circle-rpi3-usbstring.patch
+cd ../.. && make -j"$(nproc)"      # recompiles Circle only; libc++ is reused
+cd ../.. && make -j"$(nproc)"      # relinks kernel8.img
+```
+
+The patch applies to Circle Step51.1.1, the revision circle-stdlib carries at the
+time of writing.
 
 ## Acknowledgements
 
