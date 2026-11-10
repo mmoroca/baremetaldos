@@ -253,6 +253,23 @@ int main (void)
 	}
 
 	{
+		Expect (!governor::IsIdleAfter (60),
+			"un segundo de imagen quieta NO es reposo (DOOM en un menu)");
+
+		Expect (!governor::IsIdleAfter (300),
+			"cinco segundos tampoco");
+
+		Expect (governor::IsIdleAfter (governor::IdleFramesForPrompt),
+			"diez segundos de imagen identica si: eso es un prompt");
+
+		Expect (governor::IsIdleFrame (false),
+			"un frame repetido sigue siendo el disparador del contador");
+
+		Expect (!governor::IsIdleFrame (true),
+			"un frame que cambia reinicia la cuenta");
+	}
+
+	{
 		// Y la consecuencia: el juicio de ese frame repetido no puede ser
 		// "sube".  Judge() no lo sabe - juzga un tiempo, no una imagen - asi que
 		// la comprobacion es que la rama que manda es la de idle, y que es

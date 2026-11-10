@@ -38,8 +38,8 @@
 # Version stamp.  Printed by "make check" and "make version" so that a support
 # conversation can start with "which snapshot are you running?" instead of
 # guessing.  Bump it whenever the build system changes.
-PROJECT_SNAPSHOT ?= 2026-11-08.66
-PROJECT_SNAPSHOT_DATE ?= 2026-11-08
+PROJECT_SNAPSHOT ?= 2026-11-10.78
+PROJECT_SNAPSHOT_DATE ?= 2026-11-10
 
 # Raspberry Pi model: 3, 4 or 5.  4 is the default because it is the sweet
 # spot for this emulator (AArch64, fast enough for the interpreter core).

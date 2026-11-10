@@ -22,7 +22,8 @@ Pi 4 family (including the 400 and the CM4) and the Pi 5.
 - [Building from scratch](#building-from-scratch)
 - [Putting it on a card](#putting-it-on-a-card)
 - [Configuration: `boot.conf`](#configuration-bootconf)
-- [Configuration: the other two files](#configuration-the-other-two-files)
+- [Configuration: `cmdline.txt`](#configuration-cmdlinetxt)
+- [Configuration: `config.txt` and `dosbox.conf`](#configuration-configtxt-and-dosboxconf)
 - [Keys](#keys)
 - [The status panel](#the-status-panel)
 - [How it works](#how-it-works)
@@ -277,6 +278,23 @@ sudo ./scripts/update-sd.sh --dry-run /dev/sdX
 ./scripts/update-sd.sh --stage ./sdcard     # assemble a directory instead
 ```
 
+A card can also carry the kernel of **every** board: `config.txt` selects one per
+model, so a single card boots a Pi 3, a Pi 4 and a Pi 5 if the three images are in
+the root. The script copies the board it was built for by default, and copies a
+list instead when `KERNELS` says so:
+
+```bash
+RASPPI=4 KERNELS="kernel8.img kernel8-rpi4.img kernel_2712.img" \
+    ./scripts/make-sd.sh --stage ./sdcard
+```
+
+Each kernel has to exist in the tree, and each one has to come from a build of
+its own board: Circle is board-specific at compile time (`-DRASPPI` and `-mcpu`
+come from `Rules.mk`, and `circle-stdlib`'s `configure -r` decides the same in
+`Config.mk`), so one build cannot produce another board's kernel. The script
+checks that every `kernel=` line in `config.txt` names a file that is on the
+card.
+
 ### 3. After that, any computer will do
 
 The card is plain FAT32 with no special structure, so once it has been written it
@@ -306,20 +324,41 @@ deliberate.
 
 ### `display = WIDTHxHEIGHT`
 
-The framebuffer the emulator draws into. Everything DOSBox produces is converted
-and copied here, so the per-frame cost is proportional to this and not to the
-size of the emulated screen.
+**This is the one value the scripts take from this file**, and it depends on which
+board the card is in. What it does is set `width=` / `height=` in `cmdline.txt`
+when a card is made or updated - and `cmdline.txt` is what actually decides, see
+the note below and [Configuration: `cmdline.txt`](#configuration-cmdlinetxt). The framebuffer is where DOSBox's output is converted and
+copied, so the per-frame cost is proportional to this and not to the size of the
+emulated screen: every extra pixel is paid for on every frame, and on the
+smaller boards that is where the frame rate goes.
+
+| Board | Start at | Why | May go up to |
+|---|---|---|---|
+| **Pi 3** | **`800x600`** | the CPU is the limit, not the display: 800x600 is 0.48 M pixels to convert per frame against 1280x720's 0.92 M | 1024x768 if the games you run are light |
+| **Pi 4** | **`800x600` to `1280x720`** | 1280x720 is an exact 1.5x on a 1080p panel (~55 MB/s at 60 Hz); start at 800x600 if the emulated machine is a fast 486 or a Pentium | 1920x1080 on a light machine |
+| **Pi 5 and later** | **`1280x720` and up** | there is headroom for the copy; take the pixels | 1920x1080 |
+
+The other two values exist for a reason:
 
 | Value | When |
 |---|---|
 | `1920x1080` | native on a 1080p panel; the most pixels to copy |
-| `1280x720` | **default**: exact 1.5x on a 1080p panel, ~55 MB/s at 60 Hz |
 | `1024x768` | 4:3 monitors and VGA-era games |
-| `800x600` | a Pi 3, or when 720p still is not enough |
 | `640x480` | VGA exactly, one output pixel per emulated pixel, no scaler |
 
 If the mode is refused, the next one down is tried automatically, so an
 unsupported value cannot leave a black screen.
+
+> **`cmdline.txt` has the last word.** Circle creates its own console framebuffer
+> before this port creates its own, and its size comes from `width=` / `height=` in
+> `cmdline.txt`, not from here. Two different geometries mean a mode change at run
+> time, which is what used to leave the screen covered in garbage. So the console
+> wins: the port follows whatever `cmdline.txt` gave it, and if this line says
+> something else the boot carries on anyway and the panel says which file was
+> used - see [Configuration: `cmdline.txt`](#configuration-cmdlinetxt). The
+> scripts write this line into `cmdline.txt` when the card is built, which is why
+> it is still worth editing here and re-running `scripts/update-sd.sh`; the file
+> itself is authoritative for a card that already exists.
 
 > **Note on the status panel width.** The panel is 118 characters in its typical
 > state and up to 133 with every field at its maximum, which is 1064 pixels at 8
@@ -334,6 +373,62 @@ its own - 600 at the DOS prompt, 1500 for DOSBox's default cycles, 2000 only whe
 frames do not fit - and this caps the top of that range. `0` (the default) lets
 the firmware decide what the board can do. It is a ceiling, not a fixed speed: the
 governor still goes down to 600 when there is nothing to run.
+
+### Choosing the emulated CPU speed (cycles)
+
+`display` decides the cost of *drawing*; `cycles` decides the cost of
+*emulating*. They are the two numbers that make the difference between a game
+that runs and one that stutters, and they are set in different files.
+
+The speed of the emulated machine is `cycles` in `dosbox/dosbox.conf`:
+
+```ini
+cycles=fixed 24000     # 24000 = a 486DX2-66 (see the table below)
+cycleup=2000           # Ctrl+F11 and Ctrl+F12 move it by this much
+cycledown=2000
+```
+
+The shipped default is 24000, a 486DX2-66, and `cycleup`/`cycledown` are 2000 so
+one key press is roughly one machine generation. The card holds a default; the
+running value can be adjusted in fine steps without touching any file:
+
+- **Ctrl+F11 / Ctrl+F12** change the cycle count while the machine runs, by
+  `cycleup` / `cycledown` (2000 with the shipped file). Get the number right on
+  the panel first, then write it into `dosbox.conf` so it survives a reboot.
+- `config -set cycles=...` from the DOS prompt also works, and the core treats a
+  change made after startup as authoritative.
+
+Target cycle counts, by emulated CPU. These are the figures DOSBox's own
+documentation uses for `cycles` in `fixed` mode:
+
+| Emulated CPU | MHz | cycles |
+|---|---|---|
+| 386DX | 25 | 4595 |
+| 386DX | 33 | 6075 |
+| 486DX | 33 | 12019 |
+| 486DX2 | 66 | 23880 |
+| 486DX4 | 100 | 33445 |
+| 486DX5 | 133 | 47810 |
+| Pentium | 60 | 31545 |
+| Pentium | 66 | 35620 |
+| Pentium | 75 | 43500 |
+| Pentium | 90 | 52000 |
+| Pentium | 100 | 60000 |
+| Pentium | 120 | 74000 |
+
+How to use it: pick the machine the game expects, set `cycles` near that figure,
+then use Ctrl+F11/F12 to land on the value that *feels* right - the table is a
+starting point, not a law, because a game's own frame limiter and the host's
+speed both move the answer. If the panel says `pace` well below what the mode
+refreshes at, the emulated machine is being asked for more than the host can
+give, and the answer is fewer cycles or a smaller `display` - in that order.
+
+> The core's `cycles` option is a grid (multiples of 10000 plus a "fine" part in
+> thousands), so an exact figure like 23880 is not expressible from the core's
+> option table: 24000 is what the card ships, and it is 0.5 % above a real
+> 486DX2-66. `cycles=fixed 23880` written in `dosbox.conf` *is* honoured, because
+> the core parses the file; see `src/platform/bare_coreopts.h` for why those two
+> paths differ.
 
 ### `mode = auto | performance | powersave`
 
@@ -352,24 +447,83 @@ warning in the log.
 * **The CPU clock itself.** That is the governor's job, and pinning `arm_freq` in
   `config.txt` would take the decision away from it.
 
-## Configuration: the other two files
+## Configuration: `cmdline.txt`
 
-`sd/dosbox.conf` is a normal DOSBox configuration file and follows DOSBox's
-rules, including `[autoexec]`, which is where the drives are mounted. Two things
-about it are worth repeating here:
+`cmdline.txt` is **not this port's file**: it is Circle's, and the firmware hands
+it over as the kernel's command line. What it sets is everything that has to be
+decided before or outside DOSBox, and the display mode is the one that matters
+most here, because it is the size of the framebuffer everything is drawn into.
 
-* **`[cpu] cycles` is what decides whether a game is playable.** The values that
-  matter are the ones in DOSBox's own documentation: 6075 for a 386DX-33, 12010
-  for a 486DX-33, 23880 for a 486DX2-66 (the default), 40072 for a Pentium-75.
+**It is one line, and only spaces separate options.** Circle does not read the
+file from the card: it asks the firmware for it (`PROPTAG_GET_COMMAND_LINE`) and
+splits the answer on `' '` - Circle's `doc/cmdline.txt`: *"Multiple options must
+be placed on a single line delimited by a space character"*. Newlines and `#`
+comments are **data**: a commented-out option is not an option, it is part of the
+value of the one before it. Above 2048 bytes the whole string does not fit the
+buffer the firmware tag declares, `CKernelOptions` gives up, and **every option in
+the file** is ignored without a word. `scripts/make-sd.sh` and
+`scripts/update-sd.sh` therefore collapse whatever they find into one line and
+refuse to write a file that reaches 2048 bytes.
+
+The card this project builds carries:
+
+```
+loglevel=4 logdev=tty1 keymap=es usbpowerdelay=500 width=1280 height=720 socmaxtemp=80
+```
+
+That is 87 bytes. `width=` and `height=` are rewritten from `boot.conf` every time
+a card is made or updated.
+
+### The options that matter for this port
+
+| Option | Values | What it does here |
+|---|---|---|
+| `width=` / `height=` | up to `1920` / `1080` | **The display mode, and it wins over `boot.conf`.** These are the pixels the port converts every emulated frame into, so the per-frame cost is proportional to them. Unset, Circle asks the firmware for the display's own size, which arrives with the overscan border already subtracted. See the table of modes by board [above](#configuration-bootconf). |
+| `loglevel=` | `0` panic ... `4` debug, `5` trace | **A ceiling on severity, not a filter on destination.** `4` (the default) shows everything up to debug; `0` shows only panics. It does *not* choose where the log goes - `boot_log = quiet` in `boot.conf` is what keeps forty core messages off the screen. |
+| `logdev=` | `tty1` (screen), `ttyS1` (UART) | Where Circle's logger writes. `tty1` on a board with no serial cable attached. On a Pi 5 the UART is `ttyS11`. |
+| `keymap=` | `DE` `DV` `ES` `FR` `IT` `UK` `US` | The **physical** layout Circle decodes, so that the USB report for the key marked `ñ` becomes the right one. It has nothing to do with the layout DOSBox sends to the emulated machine, which stays US unless `keyboardlayout` says otherwise in `dosbox.conf`. This port feeds DOSBox with USB usage codes and never consults Circle's keymap, so the line is set for the console layer (Circle's logger, and the terminal) rather than for the emulated machine. |
+| `usbpowerdelay=` | `200` ... `8000` ms | Delay between powering a port and talking to the device. `500` is the value here; raise it if a keyboard or a stick is missed at boot on a board with a hub. |
+| `socmaxtemp=` | `40` ... `85` C | The temperature the port's governor treats as a veto: at or above it, the clock drops one level. **`80` here, and 80 is the internal default as well** - so this line changes nothing. Circle itself accepts `40`..`78`; above `78` the key is ignored by Circle and only the port's own default remains, which is the same `80`. |
+
+### The rest of Circle's options
+
+Circle accepts many more, and they are documented where they are implemented -
+`doc/cmdline.txt` in the Circle you built against
+(<https://github.com/rsta2/circle/blob/master/doc/cmdline.txt>). They reach
+hardware this port does not use on purpose: USB MIDI boost, touchscreen
+calibration, the WM8960 codec, an I2S DAC, `gpiofanpin` for a case fan,
+`usbspeed=full`, `usbignore`. None of them is needed to boot a card built by these
+scripts, and none is set.
+
+Two are worth knowing about even so, because they explain what this port does
+**not** use:
+
+* **`fast=true`** asks Circle's own `CCPUThrottle` for the maximum clock. There is
+  no `CCPUThrottle` in this kernel: the clock is the governor's job (see
+  [The status panel](#the-status-panel) and the Pi 3 note under
+  [Troubleshooting](#troubleshooting)), so the key does nothing here.
+* **`sounddev=`** picks Circle's sound device. This port opens its devices in order
+  - HDMI, then PWM (the jack), then I2S - and takes the first that starts, because
+  a device that constructs successfully is not a device that makes a noise. To
+  force the jack, build with `make AUDIO_DEVICE=pwm`.
+
+## Configuration: `config.txt` and `dosbox.conf`
+
+`sd/config.txt` is the firmware's file: it selects the kernel image per Pi model,
+fixes the HDMI mode, enables the audio subsystem, disables overscan and sets the
+clock and voltage ceilings the firmware will allow. It intentionally sets no
+`arm_freq`: the governor owns the clock, and pinning it would take the decision
+away from it.
+
+`sd/dosbox.conf` is the emulator's file, with DOSBox's own syntax:
+
+* **`[cpu] cycles` is what decides whether a game is playable.** There is a full
+  table of target values by emulated CPU in the `boot.conf` section above, and
+  Ctrl+F11 / Ctrl+F12 change it while the machine runs.
 * **`core = auto|dynamic|normal`** selects the JIT. `auto` runs the interpreter
   in real mode and switches to the dynamic recompiler in protected mode, which is
   the default and the fastest for most games. `normal` forces the interpreter and
   is useful when comparing behaviour.
-
-`sd/config.txt` and `sd/cmdline.txt` belong to **Circle**, not to DOSBox. They
-select the kernel image per Pi model, fix the HDMI mode, enable the audio
-subsystem and set the log level. `config.txt` intentionally sets no `arm_freq`:
-the governor owns the clock.
 
 ## Keys
 
@@ -582,12 +736,105 @@ src/platform/             everything that talks to Circle, FatFs or the firmware
 src/dosbox-stub/          the few POSIX and MIDI symbols DOSBox needs and the port
                           has to supply
 scripts/                  setup, build, card writing, host checks
+  setup.sh                toolchain + circle-stdlib, per board
+  make-sd.sh              one board's card, from nothing (destructive)
+  update-sd.sh            a card that already works (never deletes)
 sd/                       the files that go on the card, as they ship
-patches/                  fixes for upstream code, applied by hand (see below)
+patches/                  fixes for upstream code, applied by scripts/setup.sh
 ```
 
 `third_party/`, `build/`, `opt/` and `sdcard/` are generated and are in
 `.gitignore`.
+
+## Lessons learned
+
+These are the traps that cost real time while bringing this port up. They are
+here because anyone porting something to Circle, or to bare metal on a Raspberry
+Pi, will step in the same ones - and every one of them is invisible from the sofa.
+
+### `cmdline.txt` is not a file of options: it is one line
+
+Circle does not read `cmdline.txt` from the card. It asks the firmware for it with
+`PROPTAG_GET_COMMAND_LINE`, and what comes back is **one string that is split on
+spaces only** (Circle's `doc/cmdline.txt`: *"Multiple options must be placed on a
+single line delimited by a space character"*). Newlines are data, so every comment
+line and every line break becomes part of the value of the option before it.
+
+Worse: `TPropertyTagCommandLine::String[2048]` in `circle/bcmpropertytags.h`, and
+`CKernelOptions` bails out entirely above it:
+
+```cpp
+if (m_TagCommandLine.Tag.nValueLength >= sizeof m_TagCommandLine.String) return;
+```
+
+**Every option is dropped, with no message.** This port shipped a nicely commented
+2623-byte `cmdline.txt` for two rounds, with `width=800 height=600` on line 46, and
+the board used the firmware's default because Circle never saw the key.
+
+*Keep it to one line, no comments, under 2048 bytes.* `boot.conf` is the opposite:
+it is read with `fopen` by the port itself, so comments there are fine.
+
+### Two framebuffers exist before DOSBox draws anything
+
+`CStdlibAppStdio::Initialize()` creates Circle's console framebuffer, sized from
+`cmdline.txt`. This port then creates its own. Asking the firmware for a
+different geometry at that point is a mode change at run time, which Circle's own
+documentation says may be refused - and when it half-works, the display ends up
+scanning memory that holds the console's text, in the console's palette. That was
+the "garbage" on screen: not corruption, just a framebuffer nobody was going to
+repaint.
+
+**So `cmdline.txt` decides and the port follows it.** Every file that claims to
+set the display mode is a claim, and only one of them is read before the first
+framebuffer exists. The port used to refuse to boot when `boot.conf` and
+`cmdline.txt` disagreed, which turned a cosmetic disagreement between two text
+files into a dead board, and that is worse than the thing it reported: so now it
+prints both numbers, says which one it is using, and carries on. The scripts keep
+writing `width=`/`height=` from `boot.conf`, which is the reason editing
+`boot.conf` still works when a card is rebuilt.
+
+### `-Wunused-function` needs code generation
+
+`gcc -fsyntax-only` will not report a static function nobody calls. A check built
+on `-fsyntax-only` therefore announces "no warnings" while being unable to see that
+class of failure; `-c` sees it. The same shape of mistake applies to tests: a test
+that *prints* a value without comparing it passes every sabotage.
+
+### A still picture is not an idle machine, and `fr` is not work
+
+The clock governor's hardest measurement, and the one that took three attempts.
+
+`fr 42254us` is how long `retro_run()` took, and on a DOS text screen most of that
+is the emulated machine **sleeping** on its own timer - so a prompt looks like a
+frame that took three budgets. Charging that to the frame is what kept a Pi 3 at
+1200 MHz over a screen doing nothing, at 63 C.
+
+The obvious counters are worse than they look. A healthy machine reads `pace 30/60`
+or `35/70` with everything smooth, and a game repeating its picture - menus, status
+bars, the gap between two tics - looks exactly like a prompt through any of
+`pace`, `bd` or their ratio. Two rules were tried and both were wrong on the board:
+"identical frame is idle" (a prompt stepped down, and so did DOOM, and the audio
+broke up) and "identical *and* cheap is idle" (DOOM fine, prompt pinned at the top).
+
+What separates them is **duration**: a DOS prompt leaves the screen literally
+identical for minutes, and a game repaints something within seconds. So the rule
+waits ten seconds before calling a still screen idle. It is not clever, it is
+observable, and being wrong costs one level for three seconds.
+
+### Nothing here is on more than one core
+
+Circle serves interrupts on core 0 only, and DOSBox-core is not reentrant: its
+globals are touched without locking. So the emulator runs on core 0, in one thread,
+and `4 cores` on the panel is what the SoC has, not what the port uses. `fr` on a
+text screen is mostly sleep, so a high number there is not a call for more cores.
+
+### The firmware subtracts an overscan border from your mode
+
+In CEA modes (`hdmi_group=1`, what a TV uses) the firmware applies a 48-pixel
+overscan border per edge by default, and the framebuffer it allocates is *"the
+display's size minus overscan"* - the wording in the firmware's own `config.txt`
+template. On 1080p that is 1824x984, not 1920x1080. If a size comes back short,
+look for `disable_overscan=1` before suspecting the code.
 
 ## Licence
 
@@ -625,11 +872,17 @@ less: it starts at 80 C, and `socmaxtemp=` in `cmdline.txt` can only *lower* tha
 gap between the governor's levels, which makes the fault easier to see but does
 not fix it.
 
-### Circle patches, applied by hand
+### Circle patches
 
-`patches/` holds fixes for upstream code. They are not applied by the build: they
-touch a tree that is cloned by `scripts/setup.sh`, and `make distclean` or a new
-clone loses them.
+`patches/` holds fixes for upstream code, and **they are applied automatically**
+by `scripts/setup.sh`, which is the step that clones and configures
+circle-stdlib. Applying a patch twice is not an error: the script asks
+`git apply --reverse --check` first and skips what is already in the tree, so
+re-running `setup.sh` on an existing checkout is safe.
+
+That changed on purpose. Until .74 this section said "applied by hand", with the
+commands below, and the consequence was that a `git clone` followed by a plain
+`make` produced a kernel that stops on a Pi 3 - and nothing said why.
 
 `patches/circle-rpi3-usbstring.patch` fixes a Circle abort on the Pi 3. On a Pi 3
 `CUSBString::GetFromDescriptor()` asks for a 4-byte string descriptor, and a USB
@@ -640,16 +893,18 @@ above) then fails `assert (m_pUSBString->bLength > 2)` in
 exists for `RASPPI <= 3`, so a Pi 4 never runs it. The patch turns the assertion
 into the "no name" answer the caller already handles.
 
+You do not have to do anything: `./scripts/setup.sh` applies it. If you want to
+check that it landed:
+
 ```bash
-cd third_party/circle-stdlib/libs/circle
-git apply --check /path/to/baremetaldos/patches/circle-rpi3-usbstring.patch
-git apply         /path/to/baremetaldos/patches/circle-rpi3-usbstring.patch
-cd ../.. && make -j"$(nproc)"      # recompiles Circle only; libc++ is reused
-cd ../.. && make -j"$(nproc)"      # relinks kernel8.img
+git -C third_party/circle-stdlib/libs/circle \
+    apply --reverse --check patches/circle-rpi3-usbstring.patch && echo "applied"
 ```
 
 The patch applies to Circle Step51.1.1, the revision circle-stdlib carries at the
-time of writing.
+time of writing. If Circle moves and a patch no longer fits, `setup.sh` stops
+with the exact `git apply --check` command to run, instead of building a kernel
+that is missing the fix.
 
 ## Acknowledgements
 

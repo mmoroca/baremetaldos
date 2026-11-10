@@ -378,6 +378,13 @@ void BareSysInfoSetCPUMax (unsigned nMHz);
 ///\t      that outranks the two numbers above: a repeated frame is not work,
 ///\t      and until .65g the governor had no way to be told so.  It counted
 ///\t      presented frames, and a prompt presents seventy a second.
+///
+/// `nPresents`, `nWanted` and `nAdvanced` (the panel's `pace` and `bd`) were
+/// passed here for one round, to decide idleness from them.  They are gone: a
+/// healthy machine reads `30/60` or `35/70`, and DOOM at `pace 15/70 bd 47` is
+/// working hard, so those three numbers cannot tell idle from working.  What can
+/// is duration - see governor::IdleFramesForPrompt - and the duration is counted
+/// inside this file, from `bFrameChanged`.
 void BareSysInfoGovernorTick (unsigned nFrameMicros, unsigned nBudgetMicros,
 			      boolean bFrameChanged);
 
@@ -395,6 +402,18 @@ unsigned BareSysInfoFirmwareMode (void);
 // ---------------------------------------------------------------------------
 // Misc - bare_time.cpp
 // ---------------------------------------------------------------------------
+
+/// \brief Set how much of the boot's log goes to the screen (boot_log=).
+///
+/// 2 = everything (default), 1 = this port's own lines and nothing from the
+/// emulation core, 0 = nothing at all.  Called once by the kernel from
+/// boot.conf; bare_time.cpp consults BareLogDisplayEnabled() before painting
+/// anything the core said.  The log itself is never suppressed - CLogger gets
+/// every message either way, so tty1 and the serial port keep the full record.
+void BareLogSetDisplayLevel (unsigned nLevel);
+
+/// \return FALSE when boot.conf asked for a quiet or silent boot.
+boolean BareLogDisplayEnabled (void);
 
 /// \brief Measure the counter BareMicros() divides by.  Call once, early.
 ///

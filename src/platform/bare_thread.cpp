@@ -241,9 +241,9 @@ unsigned s_nTrueDrives = 0;
 // is what this port assumed everywhere before it started listening.
 u64 s_nDriveBudgetMicros = 16666;
 
-// Diagnóstico: cuántas veces el frontend se fue con las manos vacías.  Las
-// primeras cinco se cuentan en pantalla y luego una de cada trescientas, para
-// que un fallo repetido no tape el resto del mensaje.
+// Diagnostic: how many times the frontend came back empty-handed.  The first
+// five are reported on screen and then one in three hundred, so that a repeated
+// failure does not bury the rest of the message.
 unsigned s_nIdleReports = 0;
 
 } // namespace

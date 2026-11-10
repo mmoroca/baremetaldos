@@ -63,6 +63,8 @@ static constexpr unsigned MixerRate = 44100;
 // The base class ("dosbox") is what names the kernel in the Circle log.
 CKernel::CKernel (void)
 :	CStdlibAppStdio ("dosbox"),
+	m_nBootLogLevel (2),
+	m_bReportForced (FALSE),
 	m_nStatusLine (0),
 	m_bDisplayOwned (FALSE)
 {
@@ -186,13 +188,6 @@ void CKernel::Cleanup (void)
 	CStdlibAppStdio::Cleanup ();
 }
 
-void CKernel::Banner (const char *pLine)
-{
-	// Before the frame buffer exists, the console is the only output we have.
-	printf ("%s\n", pLine);
-	CLogger::Get ()->Write (GetKernelName (), LogNotice, "%s", pLine);
-}
-
 // Defined by the Makefile (APP_DEFINES).  The fallback keeps a stale object
 // file from breaking a build that was configured without it.
 #ifndef DOSBOX_SNAPSHOT
@@ -212,7 +207,10 @@ void CKernel::Report (const char *pFormat, ...)
 	// anyone watching with a cable, and it is the log that survives a hang.
 	CLogger::Get ()->Write (GetKernelName (), LogNotice, "%s", Buffer);
 
-	if (!m_bDisplayOwned)
+	// m_nBootLogLevel == 0 silences this port's progress, but never a failure:
+	// a boot that stops because the display mode does not match has to say so on
+	// the screen even when boot_log=off, or the card looks dead.
+	if (!m_bDisplayOwned || (m_nBootLogLevel == 0 && !m_bReportForced))
 	{
 		return;
 	}
@@ -259,16 +257,13 @@ boolean CKernel::Initialize (void)
 	// own 1 MHz clock, so that no other file has to know about CNTFRQ.
 	BareTimeCalibrate ();
 
-	// From here on the frame buffer, not the console, is what is on screen,
-	// so every stage below reports through Report() as well.
-	// The banner: version, what this is, and who wrote it.  Circle's console
-	// font is 8x16 in an 80-column text mode before the frame buffer exists, so
-	// the first line fits exactly and the second is the separator; the
-	// attribution goes on its own line rather than appended to the first, or
-	// it would be cut at column 80 on a text console.
-	Banner ("BM-DOS " DOSBOX_SNAPSHOT " - DOSBox on baremetal Raspberry Pi");
-	Banner ("by @mmoroca & arena.ai 2026");
-	Banner ("=================================================");
+	// NO banner here.  It used to print the version block twice: once through
+	// Banner() on Circle's console (printf + logger, both of which end up on that
+	// screen) and then again through Report() as soon as the frame buffer
+	// existed.  Two different screens, the same three lines, and the photo of the
+	// boot shows exactly that - "BM-DOS 2026-11-09.73 - DOSBox on baremetal
+	// Raspberry Pi" printed twice, once by each.  The version block is printed
+	// once, below, after BareVideoInit, where it lands on the screen that stays.
 
 	// --- the port's own settings ------------------------------------------
 	// Read before the frame buffer exists, because the display mode is one of
@@ -279,6 +274,135 @@ boolean CKernel::Initialize (void)
 	if (Config.Warning[0] != '\0')
 	{
 		Report ("%s", Config.Warning);
+	}
+
+	// --- how much of this boot goes on the screen --------------------------
+	//
+	// Read from boot.conf (boot_log = auto|quiet|off) and applied ONCE, here,
+	// because it decides how much of what follows is drawn.  2 = all, 1 = the
+	// port's own lines and nothing from the core, 0 = nothing at all.
+	//
+	// The core's log is routed to BareVideoStatusPrint() by bare_time.cpp, which
+	// is why this needs a level and not a switch: the port's own progress lines
+	// are the ones you need when something fails, and the core's config dump
+	// ("Variable dosbox::machine updated to ...") is the one that fills the
+	// screen with forty lines nobody reads twice.
+	m_nBootLogLevel = 2;
+	if (strcmp (Config.BootLog, "quiet") == 0)
+	{
+		m_nBootLogLevel = 1;
+	}
+	else if (strcmp (Config.BootLog, "off") == 0)
+	{
+		m_nBootLogLevel = 0;
+	}
+
+	// And told to the core's log path, which is the side that paints.
+	BareLogSetDisplayLevel (m_nBootLogLevel);
+
+	// --- cmdline.txt has the last word on the display mode ------------------
+	//
+	// Two frame buffers exist before this function reaches BareVideoInit:
+	// Circle's console (CScreenDevice, created by CStdlibAppStdio::Initialize()
+	// a few lines above, sized from cmdline.txt's width= / height= or from the
+	// maximum the firmware reports when those are absent) and the one this port
+	// is about to create.  The console's buffer is built first and is not ours
+	// to resize: asking the firmware for a *different* geometry now is a mode
+	// change at run time, Circle's own doc/cmdline.txt warns that the firmware
+	// may refuse it, and when it half-succeeds the display ends up scanning
+	// memory the console wrote text into, in the console's own palette.  That
+	// is the garbage of docs/PORTING.md row 86.
+	//
+	// So the console wins, always, and the port follows it.  boot.conf's
+	// "display =" is what scripts/make-sd.sh and scripts/update-sd.sh write into
+	// cmdline.txt when the card is built; once the card exists, cmdline.txt is
+	// the file the firmware and Circle actually read, and a boot.conf edited
+	// afterwards cannot move the mode on its own.  Saying so on the status
+	// overlay - and carrying on - is the honest behaviour: the board boots, at
+	// the mode the card was built for, and the line tells you which file to
+	// edit.  Refusing to boot over it, as this check used to, left the machine
+	// dead because of a cosmetic disagreement between two text files.
+	//
+	// mScreen is the console CStdlibAppScreen already created, and it is
+	// protected, which is exactly what a derived class is for.  GetFrameBuffer()
+	// hands back the CBcmFrameBuffer that CScreenDevice::Initialize() built from
+	// cmdline.txt's width= / height=.
+	{
+		CBcmFrameBuffer *pConsoleFB = mScreen.GetFrameBuffer ();
+
+		if (pConsoleFB != nullptr && pConsoleFB->GetWidth () != 0)
+		{
+			// What GetWidth()/GetHeight() return is the *physical* size the
+			// console asked the firmware for - CBcmFrameBuffer::GetWidth()
+			// returns m_nWidth, the number in SetPhysWidthHeight, not a
+			// read-back (lib/bcmframebuffer.cpp).  When cmdline.txt had no
+			// width=/height= at all, the console asked for 0x0 and the
+			// constructor filled m_nWidth from PROPTAG_GET_DISPLAY_DIMENSIONS,
+			// which is the display's size with the overscan border already
+			// subtracted: that is where 1824x984 came from, the firmware's
+			// answer rather than a mode anybody chose.
+			//
+			// So this compares two *requests*, and that is all it can honestly
+			// do.  The virtual height is not compared: the console asks for 0
+			// (single page) and this port asks for twice the physical height
+			// (two pages), and those two requests have never been seen to
+			// disturb each other - it is the physical geometry that has to
+			// match.
+			const unsigned nConsoleWidth  = pConsoleFB->GetWidth ();
+			const unsigned nConsoleHeight = pConsoleFB->GetHeight ();
+
+			if (   nConsoleWidth  != Config.nWidth
+			    || nConsoleHeight != Config.nHeight)
+			{
+				// Forced past boot_log=off: a line that explains why the
+				// picture is not the size you asked for has to be readable.
+				m_bReportForced = TRUE;
+
+				// "boot.conf says" only if the file actually said it: the
+				// value is the built-in default otherwise, and blaming a
+				// file for a number that is not in it is how a support
+				// thread starts.
+				Report ("display: %s has %ux%u, cmdline.txt gives %ux%u",
+					Config.bHaveDisplay ? "boot.conf" : "the default",
+					Config.nWidth, Config.nHeight,
+					nConsoleWidth, nConsoleHeight);
+				Report ("display: using cmdline.txt; to change it, edit width=%u height=%u there",
+					nConsoleWidth, nConsoleHeight);
+
+				// The other way the number can come out short, and it is the
+				// one that produced 1824x984 on a 1080p TV: the firmware
+				// subtracts an overscan border from the display mode before it
+				// answers, and in CEA (TV) modes that border is 48 px per edge
+				// by default.  So a mode that "does not exist" may simply be
+				// the requested one minus 96 in each direction.  Said as a
+				// possibility, not as a diagnosis, because only config.txt
+				// knows.
+				if (   nConsoleWidth  < Config.nWidth
+				    || nConsoleHeight < Config.nHeight)
+				{
+					Report ("if it is smaller than you asked, overscan: disable_overscan=1");
+				}
+
+				CLogger::Get ()->Write (GetKernelName (), LogWarning,
+							"Display from cmdline.txt %ux%u (config asked %ux%u)",
+							nConsoleWidth, nConsoleHeight,
+							Config.nWidth, Config.nHeight);
+
+				// Only this explanation is forced; the rest of the boot
+				// obeys boot_log again.
+				m_bReportForced = FALSE;
+			}
+
+			// The port follows the console, whatever the file said.
+			Config.nWidth  = nConsoleWidth;
+			Config.nHeight = nConsoleHeight;
+			Config.bHaveDisplay = TRUE;
+
+			Report ("display: %ux%u from cmdline.txt",
+				Config.nWidth, Config.nHeight);
+		}
+		// No console object found: nothing can be compared, and the mode from
+		// boot.conf (or the default) is the best guess left.
 	}
 
 	// --- video ------------------------------------------------------------
@@ -298,8 +422,7 @@ boolean CKernel::Initialize (void)
 	BareVideoStatusReset ();
 	Report ("BM-DOS %s - DOSBox on baremetal Raspberry Pi", DOSBOX_SNAPSHOT);
 	Report ("by @mmoroca & arena.ai 2026");
-	Report ("Display %ux%u asked (%s)", Config.nWidth, Config.nHeight,
-		Config.bHaveDisplay ? "boot.conf" : "default");
+	Report ("Display %ux%u", Config.nWidth, Config.nHeight);
 
 	// --- scheduler ---------------------------------------------------------
 	// The member is constructed at that point (before Initialize() runs at
@@ -475,15 +598,21 @@ boolean CKernel::Initialize (void)
 	// Ctrl+F9 stops the emulator, hands the audio device back, flushes the card and
 	// unmounts the volumes, and then halts the SoC with a message on screen.  At
 	// that point cutting the power is safe.
-	Banner ("DOS booting.");
-	Banner ("  PetSis           show/hide the status panel");
-	Banner ("  Ctrl+Alt+PetSis  reboot the board");
-	Banner ("  Ctrl+F9          shut down safely, then you may cut power");
-	Banner ("  Alt+Pause        pause / resume the emulated machine");
-	Banner ("  Ctrl+F5          screenshot");
-	Banner ("  Ctrl+F11 / F12   emulated cycles (2000 per press)");
-	Banner ("  Alt+F12 is NOT implemented: dosbox's own help calls it turbo.");
-	Banner ("  Settings live in dosbox/dosbox.conf on the card.");
+	// Report() and not Banner(), and that is the whole point: this runs after
+	// BareVideoInit, so the status overlay owns the screen and Report() writes
+	// there (plus the log).  Banner() writes to Circle's console - a different
+	// frame buffer that nothing is scanning any more - so these nine lines were
+	// being drawn into memory nobody could see, at coordinates that do not match
+	// the overlay's, which is the tangle at the bottom of the boot screen.
+	Report ("DOS booting.");
+	Report ("  PetSis           show/hide the status panel");
+	Report ("  Ctrl+Alt+PetSis  reboot the board");
+	Report ("  Ctrl+F9          shut down safely, then you may cut power");
+	Report ("  Alt+Pause        pause / resume the emulated machine");
+	Report ("  Ctrl+F5          screenshot");
+	Report ("  Ctrl+F11 / F12   emulated cycles (2000 per press)");
+	Report ("  Alt+F12 is NOT implemented: dosbox's own help calls it turbo.");
+	Report ("  Settings live in dosbox/dosbox.conf on the card.");
 
 	return TRUE;
 }

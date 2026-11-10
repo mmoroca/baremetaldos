@@ -18,6 +18,7 @@
 //
 #pragma once
 #include <circle/types.h>
+#include <circle/bcmframebuffer.h>
 #include <circle/logger.h>
 #include <circle/sched/scheduler.h>
 #include <cstring>
@@ -42,7 +43,31 @@ protected:
 	const char *mName;
 	CInterruptSystem mInterrupt;
 };
+// .68: the real CStdlibAppStdio inherits from CStdlibAppScreen, which owns the
+// CScreenDevice the logger is pointed at.  The port now reaches for that member
+// (CKernel::TakeOverDisplay resizes it and re-points the logger away from it),
+// so the stand-in has to have it too - with the same name and the same shape,
+// or a typo in kernel.cpp would be caught by the cross build instead of here.
+class CScreenDevice {
+public:
+	CScreenDevice (unsigned nWidth, unsigned nHeight) : m_nWidth (nWidth), m_nHeight (nHeight) {}
+	// .72: CKernel::Initialize() compares the console's physical mode against
+	// boot.conf before creating a second frame buffer - a runtime mode change is
+	// what Circle documents as unreliable, and it is the suspected cause of the
+	// garbage.  The stand-in has to offer the same accessor, or a typo in
+	// kernel.cpp would only be caught by the cross build.
+	CBcmFrameBuffer *GetFrameBuffer (void) { return nullptr; }
+	boolean Initialize (void) { return true; }
+	boolean Resize (unsigned nWidth, unsigned nHeight) { m_nWidth = nWidth; m_nHeight = nHeight; return true; }
+	unsigned GetWidth (void) const { return m_nWidth; }
+	unsigned GetHeight (void) const { return m_nHeight; }
+private:
+	unsigned m_nWidth;
+	unsigned m_nHeight;
+};
+
 class CStdlibAppStdio : public CStdlibApp {
 public:
-	CStdlibAppStdio (const char *pName) : CStdlibApp (pName) {}
+	CStdlibAppStdio (const char *pName) : CStdlibApp (pName), mScreen (0, 0) {}
+	CScreenDevice mScreen;
 };

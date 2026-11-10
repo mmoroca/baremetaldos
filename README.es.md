@@ -22,7 +22,8 @@ compila para la Pi 3, la familia Pi 4 (incluidas la 400 y la CM4) y la Pi 5.
 - [Compilar desde cero](#compilar-desde-cero)
 - [Ponerlo en una tarjeta](#ponerlo-en-una-tarjeta)
 - [Configuración: `boot.conf`](#configuración-bootconf)
-- [Configuración: los otros dos ficheros](#configuración-los-otros-dos-ficheros)
+- [Configuración: `cmdline.txt`](#configuración-cmdlinetxt)
+- [Configuración: `config.txt` y `dosbox.conf`](#configuración-configtxt-y-dosboxconf)
 - [Teclas](#teclas)
 - [El panel de estado](#el-panel-de-estado)
 - [Cómo funciona](#cómo-funciona)
@@ -276,6 +277,23 @@ sudo ./scripts/update-sd.sh --dry-run /dev/sdX
 ./scripts/update-sd.sh --stage ./sdcard     # preparar un directorio
 ```
 
+Una tarjeta puede llevar además el kernel de **todas** las placas: `config.txt`
+elige uno por modelo, así que una sola tarjeta arranca en Pi 3, Pi 4 y Pi 5 si los
+tres kernels están en la raíz. El script copia por defecto el de la placa con la
+que se compiló, y copia una lista si se le pasa `KERNELS`:
+
+```bash
+RASPPI=4 KERNELS="kernel8.img kernel8-rpi4.img kernel_2712.img" \
+    ./scripts/make-sd.sh --stage ./sdcard
+```
+
+Cada kernel tiene que existir en el árbol, y cada uno tiene que venir de una
+compilación de su propia placa: Circle es específico de placa en tiempo de
+compilación (`-DRASPPI` y `-mcpu` salen de `Rules.mk`, y el `configure -r` de
+`circle-stdlib` decide lo mismo en `Config.mk`), así que una compilación no puede
+producir el kernel de otra placa. El script comprueba que cada línea `kernel=` de
+`config.txt` nombre un fichero que esté en la tarjeta.
+
 ### 3. A partir de ahí, cualquier ordenador sirve
 
 La tarjeta es FAT32 corriente, sin estructura especial, así que una vez escrita se
@@ -306,20 +324,40 @@ que la placa arranque; es deliberado.
 
 ### `display = ANCHOxALTO`
 
-El framebuffer en el que dibuja el emulador. Todo lo que produce DOSBox se convierte
-y se copia aquí, así que el coste por frame es proporcional a esto y no al tamaño
-de la pantalla emulada.
+**Este es el valor que los scripts leen de este fichero**, y depende de en qué placa
+esté la tarjeta. Lo que hace es poner `width=` / `height=` en `cmdline.txt` cuando se
+hace o se actualiza una tarjeta - y el que decide de verdad es `cmdline.txt`, ver la
+nota de abajo y [Configuración: `cmdline.txt`](#configuración-cmdlinetxt). El framebuffer es donde se convierte y se copia la salida de DOSBox, así
+que el coste por frame es proporcional a esto y no al tamaño de la pantalla
+emulada: cada píxel de más se paga en cada frame, y en las placas pequeñas es ahí
+donde se va la tasa de refresco.
+
+| Placa | Empieza por | Por qué | Puede subir a |
+|---|---|---|---|
+| **Pi 3** | **`800x600`** | el límite es la CPU, no la pantalla: 800x600 son 0,48 M píxeles a convertir por frame frente a los 0,92 M de 1280x720 | 1024x768 si los juegos son ligeros |
+| **Pi 4** | **`800x600` a `1280x720`** | 1280x720 es 1,5x exacto en 1080p (~55 MB/s a 60 Hz); empieza en 800x600 si la máquina emulada es un 486 rápido o un Pentium | 1920x1080 con una máquina ligera |
+| **Pi 5 y posteriores** | **`1280x720` en adelante** | hay margen para la copia; coge los píxeles | 1920x1080 |
+
+Los otros dos valores existen por algo:
 
 | Valor | Cuándo |
 |---|---|
 | `1920x1080` | nativo en una pantalla 1080p; el máximo de píxeles a copiar |
-| `1280x720` | **por defecto**: 1,5x exacto en 1080p, ~55 MB/s a 60 Hz |
 | `1024x768` | monitores 4:3 y juegos de la era VGA |
-| `800x600` | una Pi 3, o si 720p todavía no llega |
 | `640x480` | VGA exacto, un píxel de salida por píxel emulado, sin escalador |
 
 Si el modo se rechaza, se prueba el siguiente hacia abajo automáticamente, así que
 un valor no soportado no puede dejar una pantalla negra.
+
+> **`cmdline.txt` manda.** Circle crea su propia consola antes de que este port cree
+> la suya, y su tamaño sale de `width=` / `height=` en `cmdline.txt`, no de aquí. Dos
+> geometrías distintas son un cambio de modo en caliente, que es lo que dejaba la
+> pantalla llena de basura. Así que gana la consola: el port se adapta a lo que
+> `cmdline.txt` le dio y, si esta línea dice otra cosa, **arranca igual** y el panel
+> dice qué fichero se usó - ver [Configuración: `cmdline.txt`](#configuración-cmdlinetxt).
+> Los scripts escriben esta línea en `cmdline.txt` al construir la tarjeta, que es
+> por lo que sigue teniendo sentido editarla aquí y relanzar
+> `scripts/update-sd.sh`; para una tarjeta que ya existe, el que manda es el otro.
 
 > **Nota sobre el ancho del panel de estado.** El panel ocupa 118 caracteres en su
 > estado típico y hasta 133 con todos los campos al máximo, que son 1064 píxeles a
@@ -334,6 +372,64 @@ DOSBox, 2000 sólo cuando los frames no caben - y esto limita la parte alta de e
 rango. `0` (por defecto) deja que el firmware decida lo que la placa puede hacer.
 Es un techo, no una velocidad fija: el governor sigue bajando a 600 cuando no hay
 nada que ejecutar.
+
+### Elegir la velocidad de la CPU emulada (ciclos)
+
+`display` decide el coste de *dibujar*; `cycles` decide el coste de *emular*. Son
+los dos números que marcan la diferencia entre un juego que va y uno que da
+saltos, y están en ficheros distintos.
+
+La velocidad de la máquina emulada es `cycles` en `dosbox/dosbox.conf`:
+
+```ini
+cycles=fixed 24000     # 24000 = un 486DX2-66 (ver la tabla de abajo)
+cycleup=2000           # Ctrl+F11 y Ctrl+F12 lo mueven en este paso
+cycledown=2000
+```
+
+El valor que se entrega es 24000, un 486DX2-66, y `cycleup`/`cycledown` son 2000
+para que una pulsación sea más o menos una generación de máquina. La tarjeta lleva
+un valor por defecto; el valor en marcha se puede ajustar **de forma fina** sin
+tocar ningún fichero:
+
+- **Ctrl+F11 / Ctrl+F12** cambian los ciclos con la máquina en marcha, en pasos de
+  `cycleup` / `cycledown` (2000 con el fichero que se entrega). Encuentra el número
+  bueno en el panel y luego escríbelo en `dosbox.conf` para que sobreviva al
+  reinicio.
+- `config -set cycles=...` desde el prompt de DOS también funciona, y el core
+  considera autoritativo un cambio hecho después del arranque.
+
+Ciclos objetivo según la CPU emulada:
+
+| CPU emulada | MHz | cycles |
+|---|---|---|
+| 386DX | 25 | 4595 |
+| 386DX | 33 | 6075 |
+| 486DX | 33 | 12019 |
+| 486DX2 | 66 | 23880 |
+| 486DX4 | 100 | 33445 |
+| 486DX5 | 133 | 47810 |
+| Pentium | 60 | 31545 |
+| Pentium | 66 | 35620 |
+| Pentium | 75 | 43500 |
+| Pentium | 90 | 52000 |
+| Pentium | 100 | 60000 |
+| Pentium | 120 | 74000 |
+
+Cómo usarla: elige la máquina que espera el juego, pon `cycles` cerca de esa cifra
+y ajusta con Ctrl+F11/F12 hasta el valor que *vaya bien*: la tabla es un punto de
+partida, no una ley, porque el limitador de frames propio del juego y la velocidad
+del anfitrión mueven la respuesta. Si el panel marca `pace` muy por debajo de lo
+que refresca el modo, se le está pidiendo a la máquina emulada más de lo que el
+anfitrión puede dar, y la respuesta es **menos ciclos o un `display` más pequeño**,
+en ese orden.
+
+> La opción `cycles` del core es una rejilla (múltiplos de 10000 más una parte
+> "fina" en millares), así que una cifra exacta como 23880 no es expresable desde
+> la tabla de opciones del core: la tarjeta entrega 24000, que está un 0,5 % por
+> encima de un 486DX2-66 real. `cycles=fixed 23880` escrito en `dosbox.conf` **sí**
+> se respeta, porque el core parsea el fichero; en `src/platform/bare_coreopts.h`
+> está por qué esos dos caminos difieren.
 
 ### `mode = auto | performance | powersave`
 
@@ -352,25 +448,81 @@ aviso en el log.
 * **El reloj de la CPU.** Eso es trabajo del governor, y fijar `arm_freq` en
   `config.txt` le quitaría la decisión.
 
-## Configuración: los otros dos ficheros
+## Configuración: `cmdline.txt`
 
-`sd/dosbox.conf` es un fichero de configuración normal de DOSBox y sigue sus
-reglas, incluida `[autoexec]`, que es donde se montan las unidades. Dos cosas
-merecen repetirse aquí:
+`cmdline.txt` **no es un fichero de este port**: es de Circle, y el firmware se lo
+pasa al núcleo como línea de órdenes. Lo que fija son las cosas que hay que decidir
+antes de DOSBox o fuera de él, y la que más importa aquí es el modo de pantalla,
+porque es el tamaño del framebuffer en el que se dibuja todo.
 
-* **`[cpu] cycles` es lo que decide si un juego es jugable.** Los valores que
-  importan son los de la documentación de DOSBox: 6075 para un 386DX-33, 12010
-  para un 486DX-33, 23880 para un 486DX2-66 (el valor por defecto), 40072 para un
-  Pentium-75.
-* **`core = auto|dynamic|normal`** elige el JIT. `auto` usa el intérprete en modo
-  real y pasa al recompilador dinámico en modo protegido, que es el valor por
-  defecto y el más rápido para casi todo. `normal` fuerza el intérprete y sirve
-  para comparar comportamientos.
+**Es una línea, y sólo los espacios separan opciones.** Circle no lee el fichero de
+la tarjeta: se lo pide al firmware (`PROPTAG_GET_COMMAND_LINE`) y parte la respuesta
+por `' '` - `doc/cmdline.txt` de Circle: *«Multiple options must be placed on a
+single line delimited by a space character»*. Los saltos de línea y los comentarios
+con `#` son **datos**: una opción comentada no es una opción, es parte del valor de
+la anterior. Por encima de 2048 bytes la cadena entera no cabe en el búfer que
+declara el tag del firmware, `CKernelOptions` se rinde y **se ignoran todas las
+opciones del fichero** sin decir nada. Por eso `scripts/make-sd.sh` y
+`scripts/update-sd.sh` colapsan lo que encuentren a una línea y se niegan a escribir
+un fichero que llegue a 2048 bytes.
 
-`sd/config.txt` y `sd/cmdline.txt` pertenecen a **Circle**, no a DOSBox. Eligen la
-imagen del núcleo según el modelo de Pi, fijan el modo HDMI, habilitan el
-subsistema de audio y ajustan el nivel de log. `config.txt` no fija `arm_freq` a
-propósito: el reloj es del governor.
+La tarjeta que construye este proyecto lleva:
+
+```
+loglevel=4 logdev=tty1 keymap=es usbpowerdelay=500 width=1280 height=720 socmaxtemp=80
+```
+
+Son 87 bytes. `width=` y `height=` se reescriben desde `boot.conf` cada vez que se
+hace o se actualiza una tarjeta.
+
+### Las opciones que importan en este port
+
+| Opción | Valores | Qué hace aquí |
+|---|---|---|
+| `width=` / `height=` | hasta `1920` / `1080` | **El modo de pantalla, y gana sobre `boot.conf`.** Son los píxeles a los que el port convierte cada frame emulado, así que el coste por frame es proporcional a ellos. Sin poner, Circle le pide al firmware el tamaño propio de la pantalla, que llega con el borde de overscan ya restado. La tabla de modos por placa está [más arriba](#configuración-bootconf). |
+| `loglevel=` | `0` pánico ... `4` debug, `5` traza | **Es un techo de severidad, no un filtro de destino.** `4` (el valor de Circle por defecto) enseña todo hasta debug; `0`, sólo los pánicos. **No** elige dónde va el log: lo que mantiene cuarenta mensajes del núcleo fuera de la pantalla es `boot_log = quiet` en `boot.conf`. |
+| `logdev=` | `tty1` (pantalla), `ttyS1` (UART) | Dónde escribe el logger de Circle. `tty1` en una placa sin cable serie. En una Pi 5 el UART es `ttyS11`. |
+| `keymap=` | `DE` `DV` `ES` `FR` `IT` `UK` `US` | La distribución **física** que decodifica Circle, para que el informe USB de la tecla rotulada `ñ` sea el correcto. **No tiene nada que ver** con la distribución que DOSBox entrega a la máquina emulada, que sigue siendo US salvo que `keyboardlayout` diga otra cosa en `dosbox.conf`. Este port le pasa a DOSBox códigos de uso USB y no consulta el keymap de Circle, así que la línea está para la capa de consola (el logger de Circle, la terminal) y no para la máquina emulada. |
+| `usbpowerdelay=` | `200` ... `8000` ms | Retardo entre dar corriente a un puerto y hablar con el dispositivo. Aquí `500`; súbelo si en el arranque se pierde un teclado o un pincho en una placa con hub. |
+| `socmaxtemp=` | `40` ... `85` °C | La temperatura que el governor del port trata como veto: a esa temperatura o por encima, el reloj baja un nivel. **Aquí `80`, y `80` es también el valor interno por defecto** - así que esta línea no cambia nada. Circle acepta `40`..`78`; por encima de `78` la clave la ignora Circle y sólo queda el `80` del propio port, que es el mismo número. |
+
+### El resto de opciones de Circle
+
+Circle acepta muchas más, y están documentadas donde se implementan -
+`doc/cmdline.txt` del Circle con el que hayas compilado
+(<https://github.com/rsta2/circle/blob/master/doc/cmdline.txt>). Tocan hardware que
+este port no usa a propósito: el boost de USB MIDI, la calibración de pantallas
+táctiles, el códec WM8960, un DAC I2S, `gpiofanpin` para un ventilador, `usbspeed=full`,
+`usbignore`. Ninguna hace falta para arrancar una tarjeta hecha con estos scripts, y
+ninguna está puesta.
+
+Dos merecen mención aunque sólo sea para explicar lo que este port **no** usa:
+
+* **`fast=true`** le pide el reloj máximo al `CCPUThrottle` de Circle. En este núcleo
+  no hay `CCPUThrottle`: el reloj es cosa del governor (ver [El panel de
+  estado](#el-panel-de-estado) y la nota de la Pi 3 en [Problemas
+  típicos](#problemas-típicos)), así que la clave no hace nada.
+* **`sounddev=`** elige el dispositivo de sonido de Circle. Este port abre los suyos en
+  orden - HDMI, luego PWM (el jack), luego I2S - y se queda con el primero que
+  arranca, porque un dispositivo que se construye bien no es un dispositivo que
+  suene. Para forzar el jack, compila con `make AUDIO_DEVICE=pwm`.
+
+## Configuración: `config.txt` y `dosbox.conf`
+
+`sd/config.txt` es el fichero del firmware: elige la imagen del núcleo por modelo de
+Pi, fija el modo HDMI, habilita el audio, desactiva el overscan y pone los techos de
+reloj y tensión que el firmware permitirá. **No** pone `arm_freq` a propósito: el
+reloj es del governor, y fijarlo le quitaría la decisión.
+
+`sd/dosbox.conf` es el fichero del emulador, con la sintaxis de DOSBox:
+
+* **`[cpu] cycles` decide si un juego es jugable.** La tabla completa de valores
+  objetivo por CPU emulada está en el apartado de `boot.conf` de arriba, y
+  Ctrl+F11 / Ctrl+F12 lo cambian con la máquina en marcha.
+* **`core = auto|dynamic|normal`** elige el JIT. `auto` usa el intérprete en modo real
+  y pasa al recompilador dinámico en modo protegido, que es el valor por defecto y lo
+  más rápido para casi todo. `normal` fuerza el intérprete y sirve para comparar
+  comportamientos.
 
 ## Teclas
 
@@ -584,11 +736,107 @@ src/platform/             todo lo que habla con Circle, FatFs o el firmware
 src/dosbox-stub/          los pocos símbolos POSIX y MIDI que DOSBox necesita y
                           que el port tiene que aportar
 scripts/                  puesta a punto, compilación, tarjetas, checks del host
+  setup.sh                toolchain + circle-stdlib, por placa
+  make-sd.sh              la tarjeta de una placa, desde cero (destructivo)
+  update-sd.sh            una tarjeta que ya arranca (nunca borra)
 sd/                       los ficheros que van a la tarjeta, tal como se entregan
-patches/                  arreglos para código de terceros, aplicados a mano (ver abajo)
+patches/                  arreglos para código de terceros, los aplica scripts/setup.sh
 ```
 
 `third_party/`, `build/`, `opt/` y `sdcard/` se generan y están en `.gitignore`.
+
+## Lecciones aprendidas
+
+Estas son las trampas que costaron tiempo de verdad al sacar este port adelante.
+Están aquí porque cualquiera que porte algo a Circle, o a bare metal en una
+Raspberry Pi, va a pisar las mismas - y ninguna se ve desde el sofá.
+
+### `cmdline.txt` no es un fichero de opciones: es una línea
+
+Circle no lee `cmdline.txt` de la tarjeta. Se lo pide al firmware con
+`PROPTAG_GET_COMMAND_LINE`, y lo que vuelve es **una sola cadena que se parte por
+espacios nada más** (`doc/cmdline.txt` de Circle: *"Multiple options must be placed
+on a single line delimited by a space character"*). Los saltos de línea son datos,
+así que cada línea de comentario y cada salto pasan a formar parte del valor de la
+opción anterior.
+
+Y peor: `TPropertyTagCommandLine::String[2048]` en `circle/bcmpropertytags.h`, y
+`CKernelOptions` se sale entero si se pasa:
+
+```cpp
+if (m_TagCommandLine.Tag.nValueLength >= sizeof m_TagCommandLine.String) return;
+```
+
+**Se tiran todas las opciones, sin un mensaje.** Este port llevó durante dos rondas
+un `cmdline.txt` de 2623 bytes con comentarios, con `width=800 height=600` en la
+línea 46, y la placa usó el modo por defecto del firmware porque Circle nunca vio
+esa clave.
+
+*Una línea, sin comentarios, por debajo de 2048 bytes.* `boot.conf` es lo contrario:
+lo lee el propio port con `fopen`, así que ahí los comentarios están bien.
+
+### Hay dos framebuffers antes de que DOSBox dibuje nada
+
+`CStdlibAppStdio::Initialize()` crea el framebuffer de consola de Circle, dimensionado
+desde `cmdline.txt`. Después este port crea el suyo. Pedirle al firmware otra
+geometría en ese momento es un cambio de modo en caliente, que la propia
+documentación de Circle avisa de que puede rechazar; y cuando medio funciona, la
+pantalla acaba leyendo memoria donde la consola escribió texto, con la paleta de la
+consola. Eso era la «basura»: no corrupción, sino un framebuffer que nadie iba a
+repintar.
+
+**Así que decide `cmdline.txt` y el port se adapta.** Todos los ficheros que dicen
+fijar el modo de pantalla son una petición, y sólo uno de ellos se lee antes de que
+exista el primer framebuffer. El port se negaba a arrancar cuando `boot.conf` y
+`cmdline.txt` no coincidían, lo que convertía un desacuerdo cosmético entre dos
+ficheros de texto en una placa muerta - peor que lo que denunciaba. Ahora escribe los
+dos números, dice cuál está usando y sigue. Los scripts siguen escribiendo
+`width=`/`height=` desde `boot.conf`, que es la razón de que editar `boot.conf` siga
+funcionando cuando se rehace la tarjeta.
+
+### `-Wunused-function` necesita generar código
+
+`gcc -fsyntax-only` **no** avisa de una función estática a la que no llama nadie.
+Una comprobación montada sobre `-fsyntax-only` anuncia «sin avisos» siendo incapaz
+de ver esa clase de fallo; `-c` sí lo ve. La misma forma de error vale para las
+pruebas: **una prueba que imprime un valor sin compararlo pasa cualquier sabotaje.**
+
+### Una imagen quieta no es una máquina en reposo, y `fr` no es trabajo
+
+La medición más difícil del governor, y la que necesitó tres intentos.
+
+`fr 42254us` es lo que tardó `retro_run()`, y en una pantalla de texto la mayor
+parte de eso es la máquina emulada **durmiendo** en su propio temporizador - así que
+un prompt parece un frame que costó tres presupuestos. Eso es lo que mantenía una
+Pi 3 a 1200 MHz sobre una pantalla que no hacía nada, a 63 °C.
+
+Los contadores obvios son peores de lo que parece. Una máquina sana lee `pace 30/60`
+o `35/70` con todo fluido, y un juego que repite su imagen - menús, barras de estado,
+el hueco entre dos tics - se ve **igual** que un prompt a través de `pace`, de `bd` o
+de su cociente. Se probaron dos reglas y las dos fallaron en la placa: «frame
+idéntico es reposo» (bajaba el prompt, y también DOOM, y el audio se cortaba) y
+«idéntico **y** barato es reposo» (DOOM bien, prompt clavado arriba).
+
+Lo que los separa es la **duración**: un prompt de DOS deja la pantalla literalmente
+idéntica durante minutos, y un juego repinta algo en segundos. Así que la regla
+espera diez segundos antes de llamar reposo a una pantalla quieta. No es listo, es
+observable, y equivocarse cuesta un nivel durante tres segundos.
+
+### Aquí no se usa más de un núcleo
+
+Circle sólo atiende interrupciones en el core 0, y DOSBox-core no es reentrante: sus
+globales se tocan sin cerrojos. Así que el emulador corre en el core 0, en un solo
+hilo, y `4 cores` en el panel es lo que tiene el SoC, no lo que usa el port. `fr` en
+una pantalla de texto es sobre todo sueño, así que un número alto ahí no es una
+petición de más núcleos.
+
+### El firmware resta un borde de overscan a tu modo
+
+En modos CEA (`hdmi_group=1`, los de TV) el firmware aplica por defecto un borde de
+overscan de 48 píxeles por lado, y el framebuffer que asigna es *«the display's size
+minus overscan»* - la frase está en la plantilla de `config.txt` del propio
+firmware. En 1080p eso son 1824x984, no 1920x1080. Si un tamaño sale corto, busca
+`disable_overscan=1` antes de sospechar del código.
 
 ## Licencia
 

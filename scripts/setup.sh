@@ -183,6 +183,48 @@ say "Initialising Circle's own submodules (hostap, lvgl)"
 git -C "$CIRCLE_STDLIB_DIR/libs/circle" submodule update --init --recursive
 
 # ---------------------------------------------------------------------------
+# 2b. Our patches to Circle, applied automatically
+# ---------------------------------------------------------------------------
+#
+# A clone that has to be patched by hand is a clone that does not work, and the
+# README saying "apply this" is not a build step.  The patches live in
+# patches/*.patch, they are applied here, and applying one twice is not an
+# error:
+#
+#   * --reverse --check is asked first: if the patch is already in the tree the
+#     reverse direction applies cleanly, and that is the test.  (git apply has no
+#     --forward - that is patch(1), which is not what is being used here.)
+#   * --check is asked second, so a patch that does not fit the tree fails with
+#     an explanation instead of half a hunk.
+#
+# The failure this closes: patches/circle-rpi3-usbstring.patch fixes an
+# assertion abort in Circle's USB string handling that only a Pi 3 can reach
+# (RASPPI <= 3).  Without it, a Pi 3 stops after USB enumeration with
+# "assertion failed" in red and the port never starts.  That was documented in
+# the README as a manual step; a Pi 3 user who did not read that far got a
+# board that looks broken.
+CIRCLE_TREE="$CIRCLE_STDLIB_DIR/libs/circle"
+
+for p in "$REPO_ROOT"/patches/*.patch; do
+	[ -f "$p" ] || continue
+
+	if git -C "$CIRCLE_TREE" apply --reverse --check "$p" >/dev/null 2>&1; then
+		echo "  already applied: $(basename "$p")"
+		continue
+	fi
+
+	if ! git -C "$CIRCLE_TREE" apply --check "$p" >/dev/null 2>&1; then
+		die "cannot apply $p to $CIRCLE_TREE - the tree has changed; see\n  git -C $CIRCLE_TREE apply --check $p"
+	fi
+
+	if git -C "$CIRCLE_TREE" apply "$p"; then
+		echo "  applied: $(basename "$p")"
+	else
+		die "could not apply $p to $CIRCLE_TREE -\n  the Circle revision may have moved; check with\n  git -C $CIRCLE_TREE apply --check $p"
+	fi
+done
+
+# ---------------------------------------------------------------------------
 # 3. Configure and build
 # ---------------------------------------------------------------------------
 

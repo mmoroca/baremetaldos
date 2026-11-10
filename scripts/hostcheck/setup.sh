@@ -63,11 +63,16 @@ cat > circle/logger.h <<'EOF'
 #pragma once
 #include <circle/types.h>
 enum TLogSeverity { LogPanic, LogError, LogWarning, LogNotice, LogDebug };
+class CDevice;
 class CLogger
 {
 public:
 	static CLogger *Get (void);
 	void Write (const char *pSource, TLogSeverity Severity, const char *pMessage, ...);
+	// .68: the port re-points the logger at its own frame buffer, so both of
+	// these exist in the contract now.  They are Circle's own functions.
+	void SetNewTarget (CDevice *pTarget);
+	CDevice *GetTarget (void) const;
 };
 EOF
 
@@ -224,9 +229,15 @@ class CDeviceNameService
 {
 public:
 	static CDeviceNameService *Get (void);
-	CDevice *GetDevice (const char *pName, boolean bBlocking, unsigned nDevice = 0);
-	void AddDevice (const char *pName, unsigned nDevice, CDevice *pDevice, boolean bBlocking);
-	void RemoveDevice (const char *pName, unsigned nDevice, boolean bBlocking);
+	// Circle has two GetDevice overloads and two AddDevice overloads.  The port
+	// uses GetDevice("tty1") and nothing else today; the rest are here because a
+	// stand-in that only has the one the port happens to call stops being a
+	// stand-in for the header the board compiles against.
+	CDevice *GetDevice (const char *pName, boolean bBlocking);
+	CDevice *GetDevice (const char *pPrefix, unsigned nIndex, boolean bBlocking);
+	void AddDevice (const char *pName, CDevice *pDevice, boolean bBlockDevice);
+	void AddDevice (const char *pPrefix, unsigned nIndex, CDevice *pDevice, boolean bBlockDevice);
+	void RemoveDevice (const char *pName, boolean bBlocking);
 };
 EOF
 
@@ -338,6 +349,36 @@ public:
 };
 EOF
 
+cat > circle/synchronize.h <<'EOF'
+#pragma once
+#include <circle/types.h>
+void CleanAndInvalidateDataCacheRange (u32 nAddress, u32 nLength);
+void SyncDataAndInstructionCache (void);
+EOF
+
+cat > circle/terminal.h <<'EOF'
+#pragma once
+#include <circle/chargenerator.h>
+#include <circle/devicenameservice.h>
+#include <circle/types.h>
+
+class CDisplay;				// real Circle: display.h; a frame buffer is one
+
+class CTerminalDevice : public CDevice
+{
+public:
+	CTerminalDevice (CDisplay *pDisplay, unsigned nDeviceIndex = 0,
+			 const TFont &rFont = DEFAULT_FONT,
+			 CCharGenerator::TFontFlags FontFlags = CCharGenerator::FontFlagsNone);
+	boolean Initialize (void);
+	unsigned GetWidth (void) const;
+	unsigned GetHeight (void) const;
+	unsigned GetColumns (void) const;
+	unsigned GetRows (void) const;
+	int Write (const void *pBuffer, size_t nCount);
+};
+EOF
+
 cat > circle/bcmframebuffer.h <<'EOF'
 #pragma once
 #include <circle/types.h>
@@ -352,6 +393,7 @@ public:
 	u32 GetVirtWidth (void) const;
 	u32 GetVirtHeight (void) const;
 	u32 GetPitch (void) const;
+	u32 GetSize (void) const;
 	u32 GetDepth (void) const;
 	uintptr GetBuffer (void) const;
 	boolean SetVirtualOffset (u32 nOffsetX, u32 nOffsetY);
@@ -361,9 +403,17 @@ EOF
 cat > circle/chargenerator.h <<'EOF'
 #pragma once
 #include <circle/types.h>
+struct TFont;				// real Circle: the font table itself
+extern const TFont Font8x16;		// DEFAULT_FONT in Circle
+#define DEFAULT_FONT Font8x16
 class CCharGenerator
 {
 public:
+	// The only flag the port uses; the real enum has more.
+	enum TFontFlags
+	{
+		FontFlagsNone = 0,
+	};
 	unsigned GetCharWidth (void) const;
 	unsigned GetCharHeight (void) const;
 	const u8 *GetCharPointer (char chChar) const;

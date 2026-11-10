@@ -270,11 +270,6 @@ constexpr u64 StepDownIdleMicros = 30000000;	// 30 s
 // a level.  Short, because nothing is running: there is no work to be late for.
 constexpr u64 IdleStepMicros = 3000000;		// 3 s
 
-// Frames in a row with no change before the board is considered idle: ~1 s at
-// 70 Hz.  Short on purpose - the walk down costs 355 us per step and three
-// steps is nine seconds, so the *steps* are what make this gentle, not the
-// threshold.
-constexpr unsigned IdleFrames = 60;
 
 /// \brief The three levels the governor uses, low first.
 struct TLevel
@@ -294,9 +289,10 @@ boolean s_bCLIActive = TRUE;		// DOS prompt on screen: nothing to run
 boolean s_bInTransition = FALSE;	// between level changes
 u64 s_nLevelSince = 0;			// when the current level was entered
 unsigned s_nOverrunFrames = 0;
-// Frames in a row whose picture was identical to the previous one.  See the
-// note on IdleFrames: this is the governor's own idle detector, and it is the
-// one the prompt needs.
+// Frames in a row whose picture was identical to the previous one.  What makes
+// this an idle detector is how many of them are required: see
+// governor::IdleFramesForPrompt, which is the whole rule and explains the two
+// rules before it that were wrong.
 unsigned s_nStillFrames = 0;		// consecutive slow frames
 unsigned s_nComfortFrames = 0;		// consecutive comfortable frames
 
@@ -425,6 +421,38 @@ void BuildLevels (void)
 	{
 		s_Levels[1].nHz = s_nMaxHz;
 		s_nLevels = 2;
+	}
+
+	// .77: and the table has to be STRICTLY increasing, which the block above
+	// does not guarantee.  It is the bug a `cpu_max_mhz = 1000` produced on a
+	// Pi 3: BuildLevels() filled {600, 1500, 1000}, the middle-in-range test
+	// failed (1500 < 1000 is false), the else branch wrote s_Levels[1] = the
+	// maximum, and the levels came out {600, 1000, 1000} with s_nLevels = 2.
+	//
+	// Two identical levels are worse than useless: a ceiling below LowHz - 600,
+	// i.e. 0 in boot.conf's terms - and a maximum the firmware reports as lower
+	// than its own minimum both collapse the two remaining slots onto the same
+	// number, and then SetLevel(s_nLevel - 1) asks the firmware for the rate it
+	// already has, gets the level clock reset, and the governor believes it
+	// stepped down while nothing moved.
+	//
+	// So the last word on the table is here, and it is one rule: drop the
+	// duplicates, keep it sorted.  With {600, 1000, 1000} the answer is {600,
+	// 1000} and the governor has somewhere to go.  With a single rate the table
+	// is one level and the governor simply has no decision to make - which is
+	// the truth for a board whose clock is pinned.
+	{
+		unsigned nOut = 1;
+		for (unsigned nIn = 1; nIn < s_nLevels; nIn++)
+		{
+			if (s_Levels[nIn].nHz > s_Levels[nOut - 1].nHz)
+			{
+				s_Levels[nOut].nHz = s_Levels[nIn].nHz;
+				nOut++;
+			}
+		}
+
+		s_nLevels = nOut;
 	}
 
 	// socmaxtemp= from cmdline.txt moves the veto point; the firmware's own
@@ -738,6 +766,15 @@ void BareSysInfoGovernorTick (unsigned nFrameMicros, unsigned nBudgetMicros,
 	// whatever else says otherwise, and it walks down one level per
 	// IdleStepMicros exactly as a quiet screen always did - the walk, the step
 	// and the hysteresis are unchanged; only the trigger is now measurable.
+	// .77: and the two fixes before this one are both withdrawn, because both were
+	// built on a measurement that cannot see the difference.  Read the note on
+	// governor::IdleFramesForPrompt for the two photographs and the two failed
+	// rules; the short version is that a game repeats its picture (menus, status
+	// bars, the gap between tics) and a prompt looks like a slow frame (most of it
+	// is the emulated machine sleeping on its own timer), so neither "identical"
+	// nor "identical and cheap" nor "advanced less often than the mode asks" is
+	// idle.  What is idle is a screen that has not changed in TEN SECONDS, which a
+	// prompt does and no game does.
 	if (governor::IsIdleFrame (bFrameChanged))
 	{
 		if (s_nStillFrames < 0xFFFF)
@@ -745,16 +782,14 @@ void BareSysInfoGovernorTick (unsigned nFrameMicros, unsigned nBudgetMicros,
 			s_nStillFrames++;
 		}
 
-		if (s_nStillFrames >= IdleFrames)
+		if (governor::IsIdleAfter (s_nStillFrames))
 		{
-			s_nOverrunFrames = 0;   // a still screen cannot be evidence of work
+			s_nOverrunFrames = 0;   // a picture that has not changed in 10 s is not work
 
 			if (s_nLevel > 0 && NowMicros () - s_nLevelSince >= IdleStepMicros)
 			{
 				SetLevel (s_nLevel - 1);
 			}
-
-			return;
 		}
 	}
 	else

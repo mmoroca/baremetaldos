@@ -111,6 +111,19 @@ struct TBootConfig
 	unsigned nCPUMaxMHz;		// 0 = let the firmware decide
 	char Mode[16];			// "auto", "performance", "powersave"
 
+	// How much of the boot writes to the screen once the port owns it:
+	//
+	//   "auto"  everything, which is what a boot you have to debug needs
+	//   "quiet" the version block and the panel, nothing from the core
+	//   "off"   nothing at all: straight to the picture
+	//
+	// "quiet" is the useful one.  The core's own messages are what fills the
+	// screen at boot (forty of them, "Variable dosbox::machine updated to ..."),
+	// and their only purpose is to tell you that a config file was read.  Nobody
+	// reads that twice.  "off" also hides the version block, so it is for a
+	// card that is finished, not for one being worked on.
+	char BootLog[8];		// "auto", "quiet", "off"
+
 	// What the file said that could not be used.  ReadBootConfig is a plain
 	// function on purpose (it runs before anything else exists and has no
 	// business touching the kernel), so it cannot call CKernel::Report();
@@ -165,6 +178,7 @@ void ReadBootConfig (TBootConfig *pConfig)
 	pConfig->bHaveDisplay = false;
 	pConfig->nCPUMaxMHz = 0;
 	strcpy (pConfig->Mode, "auto");
+	strcpy (pConfig->BootLog, "auto");
 	pConfig->Warning[0] = '\0';
 
 	FILE *pFile = fopen (BOOT_CONFIG, "r");
@@ -253,6 +267,20 @@ void ReadBootConfig (TBootConfig *pConfig)
 				// 0 means "no ceiling": the governor builds its levels from
 				// whatever the firmware says the maximum is.
 				pConfig->nCPUMaxMHz = n;
+			}
+		}
+		else if (strcmp (pKey, "boot_log") == 0)
+		{
+			if (   strcmp (pValue, "auto") == 0
+			    || strcmp (pValue, "quiet") == 0
+			    || strcmp (pValue, "off") == 0)
+			{
+				strcpy (pConfig->BootLog, pValue);
+			}
+			else
+			{
+				BootConfigWarn (pConfig, "boot.conf: unknown boot_log \"%s\""
+					" (auto|quiet|off)", pValue);
 			}
 		}
 		else if (strcmp (pKey, "mode") == 0)

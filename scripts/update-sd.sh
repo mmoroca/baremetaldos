@@ -73,7 +73,7 @@ while [ $# -gt 0 ]; do
 		usage 0
 		;;
 	*)
-		echo "Opción desconocida: $1" >&2
+		echo "Unknown option: $1" >&2
 		usage 2
 		;;
 	esac
@@ -132,15 +132,15 @@ if [ -z "$SDCARD" ]; then
 	n="$(printf '%s\n' "$candidates" | grep -c . || true)"
 
 	if [ "$n" -eq 0 ]; then
-		echo "No encuentro ninguna tarjeta montada (FAT, en un dispositivo extraíble)." >&2
+		echo "No mounted card found (FAT, on a removable device)." >&2
 		echo >&2
-		echo "Si está montada pero no la reconozco, pásale el directorio a mano:" >&2
+		echo "If it is mounted but not recognised, pass the directory yourself:" >&2
 		echo "    $0 --sdcard /run/media/$USER/ETIQUETA" >&2
 		exit 2
 	fi
 
 	if [ "$n" -gt 1 ]; then
-		echo "Hay más de una candidata. Dime cuál, con --sdcard:" >&2
+		echo "More than one candidate found. Pick one with --sdcard:" >&2
 		printf '%s\n' "$candidates" | sed 's/^/    /' >&2
 		exit 2
 	fi
@@ -156,10 +156,10 @@ SDCARD="$(cd "$SDCARD" 2>/dev/null && pwd)" || {
 
 if ! looks_like_a_card "$SDCARD"; then
 	echo "$SDCARD no parece una tarjeta de BM-DOS:" >&2
-	echo "debería tener config.txt, un kernel*.img y un directorio dos/." >&2
+	echo "should contain config.txt, a kernel*.img and a dos/ directory." >&2
 	echo >&2
-	echo "Puede ser la tarjeta de otra cosa, o una tarjeta que aún no se ha" >&2
-	echo "preparado nunca (para eso está ./scripts/make-sd.sh)." >&2
+	echo "It may belong to something else, or be a card that has never been" >&2
+	echo "prepared (that is what ./scripts/make-sd.sh is for)." >&2
 	exit 3
 fi
 
@@ -168,7 +168,7 @@ fi
 # should not need sudo.
 if [ "$DRY_RUN" -eq 0 ] && [ ! -w "$SDCARD" ]; then
 	echo "$SDCARD no se puede escribir con tu usuario." >&2
-	echo "Si la montó root, desmóntala y vuelve a montarla, o usa sudo." >&2
+	echo "If root mounted it, unmount and mount it again, or use sudo." >&2
 	exit 4
 fi
 
@@ -177,12 +177,12 @@ FS_TYPE="$(findmnt -rno FSTYPE --target "$SDCARD" 2>/dev/null || echo '?')"
 
 say "  CARD       $SDCARD"
 say "             $FS_SOURCE ($FS_TYPE)"
-say "  DESDE      $REPO_ROOT"
-say "  SELLO      $TARGET_STAMP"
+say "  FROM       $REPO_ROOT"
+say "  STAMP      $TARGET_STAMP"
 say ""
 
 if [ "$DRY_RUN" -eq 1 ]; then
-	say "  MODO       --dry-run: no se escribe nada"
+	say "  MODE       --dry-run: nothing is written"
 	say ""
 fi
 
@@ -199,7 +199,7 @@ N_CHANGED=0
 N_SAME=0
 N_CREATED=0
 
-# copy_if_different <origen> <destino> <descripción>
+# copy_if_different <source> <destination> <label>
 copy_if_different () {
 	src="$1"
 	dst="$2"
@@ -211,14 +211,14 @@ copy_if_different () {
 
 	if [ -f "$dst" ]; then
 		if cmp -s "$src" "$dst"; then
-			step "igual" "$what"
+			step "same" "$what"
 			N_SAME=$((N_SAME + 1))
 			return 0
 		fi
-		step "actualiza" "$what  ($(wc -c <"$dst") -> $(wc -c <"$src") bytes)"
+		step "update" "$what  ($(wc -c <"$dst") -> $(wc -c <"$src") bytes)"
 		N_CHANGED=$((N_CHANGED + 1))
 	else
-		step "nuevo" "$what"
+		step "new" "$what"
 		N_CREATED=$((N_CREATED + 1))
 	fi
 
@@ -234,25 +234,97 @@ copy_if_different () {
 	mv -f "$tmp" "$dst"
 }
 
-# copy_if_different_backup <origen> <destino> <descripción>
+# copy_if_different_backup <source> <destination> <label>
 #
 # Same, but keeps the previous version as <destino>.bak the first time it
 # differs, and never replaces an existing backup: the first one is the version
 # the card actually had before any of this.
+# ---------------------------------------------------------------------------
+# cmdline.txt carries the display mode, taken from boot.conf
+# ---------------------------------------------------------------------------
+#
+# Circle's console frame buffer is created before this port's, from width= /
+# height= in cmdline.txt; the port's own frame buffer comes from boot.conf.  Two
+# different geometries mean a mode change at runtime, which is what leaves the
+# display scanning memory that still holds the console's text (docs/PORTING.md,
+# row 86).  Writing the pair here is what keeps the two files in agreement, and
+# CKernel::Initialize refuses to start when they are not - loudly, with the exact
+# line to add, instead of showing a screen of dashes.
+#
+# Rewrites "$1" (a cmdline.txt) using "$2" (a boot.conf).  Leaves the file alone
+# when boot.conf has no display line.
+set_cmdline_display () {
+	local cmdline="$1" bootconf="$2" width height size
+
+	[ -f "$bootconf" ] || return 0
+
+	read -r width height <<< "$(sed -n 's/^[[:space:]]*display[[:space:]]*=[[:space:]]*\([0-9][0-9]*\)[[:space:]]*[xX][[:space:]]*\([0-9][0-9]*\).*/\1 \2/p' "$bootconf" | tail -1)"
+	if [ -z "${width:-}" ] || [ -z "${height:-}" ]; then
+		return 0
+	fi
+
+	# Already right, and already a single options line?  Then leave it alone, so
+	# the .bak machinery does not report a change on every run.
+	if grep -q -E "width=${width} height=${height}([[:space:]]|$)" "$cmdline" 2>/dev/null \
+	   && [ "$(grep -c -v -E '^[[:space:]]*(#|$)' "$cmdline")" -le 1 ]; then
+		return 0
+	fi
+
+	# THE TRAP THIS CLOSES.  This file used to be a nicely commented multiple-line
+	# file.  Circle does not read it as a file of options: the firmware hands the
+	# whole thing over as one string and CKernelOptions::GetToken() splits it on
+	# spaces only (doc/cmdline.txt: "Multiple options must be placed on a single
+	# line delimited by a space character").  So every comment line and every
+	# newline became part of the value of the option before it, and - above 2048
+	# bytes - the whole file is dropped without a word (koptions.cpp:
+	# "if (m_TagCommandLine.Tag.nValueLength >= sizeof m_TagCommandLine.String)
+	# return;").  On the board that meant width=800 was written on line 46 of a
+	# commented file and Circle still used 1824x984: it never saw the key.
+	#
+	# So: collapse everything non-comment into ONE line, drop any old
+	# width=/height=, and put the new pair at the end.  Comments are removed on
+	# purpose - a file that explains itself is a file whose options are read as
+	# part of a comment.  The explanation lives here and in docs/PORTING.md.
+	awk -v w="$width" -v h="$height" '
+		/^[[:space:]]*#/ { next }
+		/^[[:space:]]*$/ { next }
+		{
+			n = split ($0, tok, " ")
+			for (j = 1; j <= n; j++) {
+				if (tok[j] == "") continue
+				if (tok[j] ~ /^width=/ || tok[j] ~ /^height=/) continue
+				out = out (out == "" ? "" : " ") tok[j]
+			}
+		}
+		END {
+			if (out == "") out = "loglevel=4 logdev=tty1"
+			print out " width=" w " height=" h
+		}' "$cmdline" > "$cmdline.new"
+	mv "$cmdline.new" "$cmdline"
+
+	size="$(wc -c < "$cmdline")"
+	if [ "$size" -ge 2048 ]; then
+		echo "  ERROR: $cmdline is $size bytes; Circle ignores the whole file above 2048" >&2
+		return 1
+	fi
+
+	step "cmdline" "width=$width height=$height (from boot.conf, $size bytes)"
+}
+
 copy_if_different_backup () {
 	src="$1"
 	dst="$2"
 	what="$3"
 
 	if [ -f "$dst" ] && ! cmp -s "$src" "$dst" && [ ! -f "$dst.bak" ]; then
-		step "respaldo" "$what.original -> $(basename "$dst").bak"
+		step "backup" "$what.original -> $(basename "$dst").bak"
 		[ "$DRY_RUN" -eq 1 ] || cp -f "$dst" "$dst.bak"
 	fi
 
 	copy_if_different "$src" "$dst" "$what"
 }
 
-say "-- kernel y arranque"
+say "-- kernel and boot files"
 for img in "$REPO_ROOT"/kernel*.img; do
 	[ -f "$img" ] || continue
 	copy_if_different "$img" "$SDCARD/$(basename "$img")" "$(basename "$img")"
@@ -263,7 +335,7 @@ if [ -f "$BOOT_DIR/armstub8-rpi4.bin" ]; then
 fi
 
 say ""
-say "-- configuración (se guarda una copia .bak la primera vez que cambia)"
+say "-- configuration (a .bak copy is kept the first time a file changes)"
 copy_if_different_backup "$REPO_ROOT/sd/config.txt"  "$SDCARD/config.txt"  "config.txt"
 copy_if_different_backup "$REPO_ROOT/sd/cmdline.txt" "$SDCARD/cmdline.txt" "cmdline.txt"
 
@@ -277,8 +349,15 @@ else
 	copy_if_different "$REPO_ROOT/sd/boot.conf" "$SDCARD/boot.conf" "boot.conf"
 fi
 
+# Now that both files are on the card, make cmdline.txt agree with it.  On the
+# card, not on the repo copy: the card is the thing that has to boot.  Done after
+# boot.conf is in place, which is the only order that works on a first run.
+if [ "$DRY_RUN" -eq 0 ]; then
+	set_cmdline_display "$SDCARD/cmdline.txt" "$SDCARD/boot.conf"
+fi
+
 say ""
-say "-- firmware (sólo si falta o es distinto)"
+say "-- firmware (only if missing or different)"
 for f in bootcode.bin start4.elf fixup4.dat; do
 	copy_if_different "$BOOT_DIR/$f" "$SDCARD/$f" "$f"
 done
@@ -298,10 +377,10 @@ done
 # directory, and it never removes or renames anything inside one.
 
 say ""
-say "-- directorios (sólo se crean los que falten)"
+say "-- directories (only the missing ones are created)"
 for d in dos dosbox dosbox/system dosbox/saves dosbox/system/soundfonts; do
 	if [ -d "$SDCARD/$d" ]; then
-		step "existe" "$d/"
+		step "exists" "$d/"
 	else
 		step "crea"   "$d/"
 		[ "$DRY_RUN" -eq 1 ] || mkdir -p "$SDCARD/$d"
@@ -339,7 +418,7 @@ step "intacto" "dosbox/saves/ ($n_saves ficheros)"
 say ""
 if [ "$DRY_RUN" -eq 1 ]; then
 	say "  PLAN       $N_CREATED nuevos, $N_CHANGED cambios, $N_SAME ya estaban bien"
-	say "             nada escrito (--dry-run). Quita la opción para hacerlo."
+	say "             nothing written (--dry-run). Drop the option to do it."
 else
 	sync
 	say "  HECHO      $N_CREATED nuevos, $N_CHANGED cambios, $N_SAME ya estaban bien"

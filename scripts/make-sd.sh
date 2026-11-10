@@ -53,6 +53,83 @@ if [ -n "$TOOLCHAIN_BIN" ]; then
 fi
 STAGE=""
 
+
+# ---------------------------------------------------------------------------
+# cmdline.txt and the display mode
+# ---------------------------------------------------------------------------
+#
+# Circle's own console (CScreenDevice) is created by CStdlibAppStdio::Initialize()
+# *before* this port creates its frame buffer, and its size comes from width= /
+# height= in cmdline.txt, not from boot.conf.  When those two keys are missing
+# Circle asks the firmware for the maximum it reports, and the port then asks for
+# a different geometry - a mode change at runtime, which Circle's doc/cmdline.txt
+# says the firmware may refuse, and which leaves the display scanning memory the
+# console wrote text into (see docs/PORTING.md, row 86).
+#
+# So the two files have to agree, and the way to guarantee it is to write
+# cmdline.txt from boot.conf here instead of hoping the user keeps them in sync.
+# The port also refuses to start when they disagree (CKernel::Initialize), so a
+# card built by hand fails loudly instead of showing garbage.
+#
+# Prints nothing; rewrites $2 from $1 and from $3 (boot.conf path).
+set_cmdline_display () {
+	local cmdline="$1" bootconf="$2" width height size
+
+	[ -f "$bootconf" ] || return 0
+
+	read -r width height <<< "$(sed -n 's/^[[:space:]]*display[[:space:]]*=[[:space:]]*\([0-9][0-9]*\)[[:space:]]*[xX][[:space:]]*\([0-9][0-9]*\).*/\1 \2/p' "$bootconf" | tail -1)"
+	if [ -z "${width:-}" ] || [ -z "${height:-}" ]; then
+		return 0
+	fi
+
+	# Already right, and already a single options line?  Then leave it alone, so
+	# the .bak machinery does not report a change on every run.
+	if grep -q -E "width=${width} height=${height}([[:space:]]|$)" "$cmdline" 2>/dev/null \
+	   && [ "$(grep -c -v -E '^[[:space:]]*(#|$)' "$cmdline")" -le 1 ]; then
+		return 0
+	fi
+
+	# THE TRAP THIS CLOSES.  This file used to be a nicely commented multiple-line
+	# file.  Circle does not read it as a file of options: the firmware hands the
+	# whole thing over as one string and CKernelOptions::GetToken() splits it on
+	# spaces only (doc/cmdline.txt: "Multiple options must be placed on a single
+	# line delimited by a space character").  So every comment line and every
+	# newline became part of the value of the option before it, and - above 2048
+	# bytes - the whole file is dropped without a word (koptions.cpp:
+	# "if (m_TagCommandLine.Tag.nValueLength >= sizeof m_TagCommandLine.String)
+	# return;").  On the board that meant width=800 was written on line 46 of a
+	# commented file and Circle still used 1824x984: it never saw the key.
+	#
+	# So: collapse everything non-comment into ONE line, drop any old
+	# width=/height=, and put the new pair at the end.  Comments are removed on
+	# purpose - a file that explains itself is a file whose options are read as
+	# part of a comment.  The explanation lives here and in docs/PORTING.md.
+	awk -v w="$width" -v h="$height" '
+		/^[[:space:]]*#/ { next }
+		/^[[:space:]]*$/ { next }
+		{
+			n = split ($0, tok, " ")
+			for (j = 1; j <= n; j++) {
+				if (tok[j] == "") continue
+				if (tok[j] ~ /^width=/ || tok[j] ~ /^height=/) continue
+				out = out (out == "" ? "" : " ") tok[j]
+			}
+		}
+		END {
+			if (out == "") out = "loglevel=4 logdev=tty1"
+			print out " width=" w " height=" h
+		}' "$cmdline" > "$cmdline.new"
+	mv "$cmdline.new" "$cmdline"
+
+	size="$(wc -c < "$cmdline")"
+	if [ "$size" -ge 2048 ]; then
+		echo "  ERROR: $cmdline is $size bytes; Circle ignores the whole file above 2048" >&2
+		return 1
+	fi
+
+	step "cmdline" "width=$width height=$height (from boot.conf, $size bytes)"
+}
+
 die () { echo "error: $*" >&2; exit 1; }
 say () { printf '\n=== %s\n' "$*"; }
 
@@ -108,6 +185,20 @@ else
 fi
 cp "$REPO_ROOT/sd/config.txt" "$STAGE/config.txt"
 cp "$REPO_ROOT/sd/cmdline.txt" "$STAGE/cmdline.txt"
+# boot.conf was missing from a freshly staged card until .72, so the port fell
+# back to its built-in 1280x720 and cmdline.txt had nothing to agree with.  Same
+# rule as dosbox.conf: it is the user's file once it exists.
+if [ -f "$STAGE/boot.conf" ]; then
+	echo "  keeping existing $STAGE/boot.conf"
+else
+	cp "$REPO_ROOT/sd/boot.conf" "$STAGE/boot.conf"
+fi
+# The display mode has to be the same in both files; see set_cmdline_display().
+if [ -f "$STAGE/boot.conf" ]; then
+	set_cmdline_display "$STAGE/cmdline.txt" "$STAGE/boot.conf"
+else
+	set_cmdline_display "$STAGE/cmdline.txt" "$REPO_ROOT/sd/boot.conf"
+fi
 
 # Firmware.  Circle's boot/ directory carries the files that are known to work
 # with the Circle version we built against, which is a better bet than whatever
@@ -268,7 +359,7 @@ if [ -n "${TARGET_DEVICE:-}" ]; then
 	# The WHOLE card, not one of its partitions.  This script repartitions and
 	# reformats; handed a partition it writes a partition table *inside* it, and
 	# the kernel then refuses to re-read it ("particiones escritas pero no hemos
-	# podido informar al núcleo"), which looks like a much bigger problem than it
+	# could report to the kernel"), which looks like a much bigger problem than it
 	# is.  Catching it here costs three lines.
 	if [ "$(lsblk -no TYPE "$TARGET_DEVICE" 2>/dev/null)" = "part" ]; then
 		die "$TARGET_DEVICE is a partition, not the card. This script repartitions the device, so it needs the whole thing:

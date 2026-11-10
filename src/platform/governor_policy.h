@@ -85,6 +85,48 @@ constexpr TVerdict Judge (unsigned nUsedMicros, unsigned nBudgetMicros)
 	return TVerdict::Borderline;
 }
 
+/// \brief How long a picture has to be literally identical before the machine
+///\t   counts as idle.  Ten seconds at 70 Hz.
+///
+/// This constant is the whole idle detector, and it is a *duration* because the
+/// two cases that broke the previous attempts differ in duration and in nothing
+/// else that the panel can show.
+///
+/// The history matters, because two attempts in a row got this wrong:
+///
+///   `.72`  "identical frame = idle", 60 frames (~1 s).  A DOS prompt stepped
+///          down to 600 MHz, which was the point - and DOOM stepped down too,
+///          because a game repeats its picture all the time: menus, status bars,
+///          the gap between two tics.  The audio broke up mid-game.
+///   `.74`  "identical AND cheap = idle".  That fixed DOOM and broke the prompt:
+///          at a prompt most of a 42 ms frame is the emulated machine sleeping on
+///          its own timer, so the frame is never "cheap", the clock stayed at the
+///          top and the board reached 63 C over a screen doing nothing.
+///   `.77`  "the emulated machine advanced fewer times than the mode asks".  Off
+///          the board: a healthy machine reads `30/60` or `35/70`, and DOOM at
+///          `pace 15/70 bd 47` is doing plenty.  Those counters cannot separate
+///          idle from working, and no amount of comparing them will make them.
+///
+/// What does separate them is time, and it is the one thing that is not a
+/// heuristic: a DOS prompt leaves the screen *literally identical for minutes*.
+/// A game does not - even a static menu repaints something within a few seconds
+/// (a blinking cursor, an animated face, a status bar clock).  So the rule does
+/// not try to judge one frame; it waits long enough that "still" means still.
+///
+/// Ten seconds costs nothing when it is wrong: one level, which is 3 s to reach
+/// and 355 us plus two seconds of overrun to undo as soon as the picture moves.
+constexpr unsigned IdleFramesForPrompt = 700;
+
+/// \brief TRUE when a stretch of identical frames is long enough to be a prompt.
+///
+/// One condition, as before: counting the frames is the caller's, deciding what
+/// the count means is here.
+constexpr bool IsIdleAfter (unsigned nStillFrames)
+{
+	return nStillFrames >= IdleFramesForPrompt;
+}
+
+
 /// \brief TRUE when this frame proves the emulated machine is doing nothing.
 ///
 /// The .65g addition, and it is a *measurement*, not a heuristic: a frame that
@@ -101,6 +143,7 @@ constexpr bool IsIdleFrame (bool bFrameChanged)
 {
 	return !bFrameChanged;
 }
+
 
 /// The word the panel prints, and it needs to know what the governor can still
 /// do - not only what the last frame cost.

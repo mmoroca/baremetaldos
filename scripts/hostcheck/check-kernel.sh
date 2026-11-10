@@ -49,8 +49,34 @@ sh "$DIR/setup.sh" > /dev/null
 
 CXX="${HOST_CXX:-g++}"
 
-for f in main.cpp kernel.cpp platform/bare_libretro.cpp platform/bare_thread.cpp; do
-	"$CXX" -fsyntax-only -std=gnu++23 -Wall -Wextra -Wpedantic \
+# Somewhere for the objects.  -c needs a file, and it must not land in the repo.
+OBJ="$(mktemp -t bmdos-check-XXXXXX.o)"
+trap 'rm -f "$OBJ"' EXIT
+
+# bare_video.cpp joins the list in .69, and not because it is new: it was the one
+# file of ours that no check compiled with warnings on.  check-platform compiles
+# it - with -w, and without linking - so .68 shipped a file with THREE warnings
+# in it (a static declared and never defined, and the definition reported as
+# unused) and the only thing that noticed was the linker, on the board.
+#
+# The gap is worth naming precisely: check-platform is a symbol check (it wants
+# the object file, not the warnings) and check-kernel is an interface check (it
+# wants the files that include circle-stdlib and the libretro API).  bare_video
+# is neither - it only needs Circle headers - and fell between the two.
+for f in main.cpp kernel.cpp platform/bare_video.cpp platform/bare_libretro.cpp \
+         platform/bare_thread.cpp; do
+	# -Werror is on purpose, and it is safe because this is the HOST check: it
+	# never builds the image.  Without it the loop below printed the warning,
+	# exited 0 and then announced "(no warnings)" - which is how .68 shipped a
+	# file with three of them.  A check that reports and does not fail is a check
+	# that says "green".
+	# -c and not -fsyntax-only, and the difference is not cosmetic: gcc only
+	# reports -Wunused-function when it generates code, and -fsyntax-only stops
+	# before that.  .72 shipped a dead ScrollStatus() with this loop saying
+	# "no warnings", because the loop could not physically see it.  Verified by
+	# compiling a file with one unused static function both ways: -fsyntax-only
+	# is silent, -c fails.
+	"$CXX" -c -o "$OBJ" -std=gnu++23 -Wall -Wextra -Wpedantic -Werror \
 		-I "$DIR" -I "$DIR/fatfs" -I "$ROOT/src" \
 		-include "$DIR/circle_stdlib_app.h" \
 		-DDOSBOX_SNAPSHOT='"check"' \

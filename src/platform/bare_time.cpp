@@ -166,6 +166,24 @@ u64 BareMicros (void)
 	return nRaw / nTicksPerMicro;
 }
 
+// How much of this boot is drawn on the screen.  2 until the kernel says
+// otherwise, which is what a boot being debugged wants.  A plain static and not
+// an atomic: it is written once, before the emulator thread exists.
+static unsigned s_nDisplayLevel = 2;
+
+void BareLogSetDisplayLevel (unsigned nLevel)
+{
+	s_nDisplayLevel = nLevel > 2 ? 2 : nLevel;
+}
+
+boolean BareLogDisplayEnabled (void)
+{
+	// Level 1 still shows this port's own progress, and that does not come
+	// through BareLog at all - it comes from CKernel::Report().  So anything
+	// that arrives here IS the core speaking, and "enabled" means level 2.
+	return s_nDisplayLevel >= 2 ? TRUE : FALSE;
+}
+
 void BareLog (int nLevel, const char *pText)
 {
 	if (pText == nullptr)
@@ -195,6 +213,17 @@ void BareLog (int nLevel, const char *pText)
 	// identical "using the default" lines are suppressed here; they cost more
 	// than they explain.
 	if (strncmp (pText, "RETRO_ENVIRONMENT_GET_VARIABLE", 30) == 0)
+	{
+		return;
+	}
+
+	// boot_log=quiet / off in boot.conf.  The kernel reads the file and publishes
+	// the level here exactly once, before the display exists; until then the
+	// default is "show everything", which is the right default for the first
+	// moments of a boot you might have to debug.  Note that this suppresses the
+	// DISPLAY, never the log: CLogger has already been written to two lines
+	// above, so the message still reaches tty1 and the serial port.
+	if (!BareLogDisplayEnabled ())
 	{
 		return;
 	}

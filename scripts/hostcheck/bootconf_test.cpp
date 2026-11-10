@@ -42,6 +42,7 @@ struct TCase
 	bool        bWantHave;
 	unsigned    nWantMaxMHz;
 	const char *pWantMode;
+	const char *pWantBootLog;		// .73: auto | quiet | off
 	const char *pWantWarningPart;	// nullptr = no warning expected
 };
 
@@ -52,56 +53,56 @@ static const TCase Cases[] =
 	  "display = 1280x720     # 1920x1080 | 1280x720 | ...\n"
 	  "cpu_max_mhz = 0        # techo del governor\n"
 	  "mode = auto\n",
-	  1280, 720, true, 0, "auto", nullptr },
+	  1280, 720, true, 0, "auto", "auto", nullptr },
 
 	{ "resolucion menor y techo",
 	  "display = 800x600\ncpu_max_mhz = 1500\n",
-	  800, 600, true, 1500, "auto", nullptr },
+	  800, 600, true, 1500, "auto", "auto", nullptr },
 
 	{ "sin espacios y con comentario",
 	  "display=1024x768   # asi tambien\n",
-	  1024, 768, true, 0, "auto", nullptr },
+	  1024, 768, true, 0, "auto", "auto", nullptr },
 
 	{ "X mayuscula",
 	  "display = 800X600\n",
-	  800, 600, true, 0, "auto", nullptr },
+	  800, 600, true, 0, "auto", "auto", nullptr },
 
 	{ "CRLF de un editor de Windows",
 	  "display = 640x480\r\n",
-	  640, 480, true, 0, "auto", nullptr },
+	  640, 480, true, 0, "auto", "auto", nullptr },
 
 	// No file is not an error: defaults, and nothing to say about it.
 	{ "fichero ausente", nullptr,
-	  1280, 720, false, 0, "auto", nullptr },
+	  1280, 720, false, 0, "auto", "auto", nullptr },
 
 	{ "solo comentarios y lineas vacias",
 	  "# nada\n\n   \n",
-	  1280, 720, false, 0, "auto", nullptr },
+	  1280, 720, false, 0, "auto", "auto", nullptr },
 
 	// Everything below is a mistake, and every one of them has to be visible.
 	{ "modo fuera de rango",
 	  "display = 4000x2000\n",
-	  1280, 720, false, 0, "auto", "4000x2000 out of range" },
+	  1280, 720, false, 0, "auto", "auto", "4000x2000 out of range" },
 
 	{ "modo ilegible",
 	  "display = grande\n",
-	  1280, 720, false, 0, "auto", "as WxH" },
+	  1280, 720, false, 0, "auto", "auto", "as WxH" },
 
 	{ "clave mal escrita",
 	  "resolucion = 800x600\n",
-	  1280, 720, false, 0, "auto", "unknown key" },
+	  1280, 720, false, 0, "auto", "auto", "unknown key" },
 
 	{ "frecuencia absurda, pero el modo se respeta",
 	  "cpu_max_mhz = 9999\ndisplay = 640x480\n",
-	  640, 480, true, 0, "auto", "out of range" },
+	  640, 480, true, 0, "auto", "auto", "out of range" },
 
 	{ "mode que existe pero no se aplica",
 	  "mode = performance\n",
-	  1280, 720, false, 0, "performance", "not applied yet" },
+	  1280, 720, false, 0, "performance", "auto", "not applied yet" },
 
 	{ "mode inventado",
 	  "mode = turbo\n",
-	  1280, 720, false, 0, "auto", "unknown mode" },
+	  1280, 720, false, 0, "auto", "auto", "unknown mode" },
 
 	// vga_hz is no longer a key of this file (.65g removed it: it could not make
 	// a slow machine faster, it only made the emulated machine slower, and it
@@ -111,18 +112,34 @@ static const TCase Cases[] =
 	// nothing instead of pretending it worked.
 	{ "vga_hz = 60 ya no es una clave",
 	  "vga_hz = 60\n",
-	  1280, 720, false, 0, "auto", "unknown key" },
+	  1280, 720, false, 0, "auto", "auto", "unknown key" },
 
 	{ "una linea vieja no rompe lo demas",
 	  "vga_hz = 60\ndisplay = 640x480\ncpu_max_mhz = 1500\n",
-	  640, 480, true, 1500, "auto", "unknown key" },
+	  640, 480, true, 1500, "auto", "auto", "unknown key" },
+
+
+	// .73: boot_log.  "auto" is the default and the one a card being debugged
+	// wants; "quiet" exists because the core's own config dump (forty lines of
+	// "Variable dosbox::machine updated to ...") is what fills the screen at
+	// boot, and it is worth nothing after the first time.
+	{ "boot_log = quiet",
+	  "boot_log = quiet\n",
+	  1280, 720, false, 0, "auto", "quiet", nullptr },
+
+	{ "boot_log = off con display",
+	  "boot_log = off\ndisplay = 800x600\n",
+	  800, 600, true, 0, "auto", "off", nullptr },
+
+	{ "boot_log inventado",
+	  "boot_log = silent\n",
+	  1280, 720, false, 0, "auto", "auto", "unknown boot_log" },
 
 	// The first complaint wins: the buffer is one line, and the first mistake
 	// is the one to fix.
 	{ "dos errores: manda el primero",
 	  "display = 99999x99999\nresolucion = 800x600\n",
-	  1280, 720, false, 0, "auto", "out of range" },
-};
+	  1280, 720, false, 0, "auto", "auto", "out of range" },};
 
 static unsigned Errors = 0;
 
@@ -181,6 +198,14 @@ int main (void)
 		Check (   Config.nWidth == pCase->nWantWidth
 		       && Config.nHeight == pCase->nWantHeight,
 			pCase->pName, "modo", Buffer, "");
+
+		// .73: boot_log, and this one is checked rather than printed.  The first
+		// version of this addition labelled the field and asserted nothing, which
+		// a deliberate sabotage proved: replacing the assignment in the parser
+		// with (void) 0 left the whole table green.  A test that names a value
+		// without comparing it is a comment.
+		Check (strcmp (Config.BootLog, pCase->pWantBootLog) == 0, pCase->pName,
+			"boot_log", Config.BootLog, pCase->pWantBootLog);
 
 		Check (Config.bHaveDisplay == pCase->bWantHave, pCase->pName,
 			pCase->bWantHave ? "boot.conf manda" : "valores por defecto",

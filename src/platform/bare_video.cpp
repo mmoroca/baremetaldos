@@ -35,6 +35,7 @@
 #include <circle/bcmframebuffer.h>
 #include <circle/chargenerator.h>
 #include <circle/logger.h>
+#include <circle/synchronize.h>
 #include <circle/util.h>
 
 #include <cstdint>
@@ -56,6 +57,14 @@ unsigned s_nDstWidth = 0;
 unsigned s_nDstHeight = 0;
 unsigned s_nDstX = 0;
 unsigned s_nDstY = 0;
+
+// Presents left before the boot text is wiped from underneath the picture (see
+// BareVideoPresent).  Zero means "nothing to do", which is the normal case.
+unsigned s_nWipeAfterPresents = 0;
+
+// How many frames have reached the screen since the port started.  Used only
+// for the heartbeat above.
+unsigned s_nPresentedSinceStart = 0;
 
 u32 *s_pRowBuffer = nullptr;
 u32 *s_pRowBuffer2 = nullptr;		// second row, for vertical interpolation
@@ -472,37 +481,6 @@ void DrawText (u32 *pDst, unsigned nPitch, unsigned nX, unsigned nY,
 	}
 }
 
-// Move every line of text up by one.  Done on the frame buffer with memmove per
-// line: it is a handful of lines once per message, and it keeps working when
-// there is no font metric to spare.  The cursor stays at the last line, so the
-// newest message is always the one at the bottom.
-void ScrollStatus (void)
-{
-	const unsigned nLineHeight = s_Font.GetCharHeight () + 2;
-	const unsigned nLines = BareVideoStatusLines ();
-	if (nLines < 2)
-	{
-		return;
-	}
-
-	const u32 nPitch = s_pFrameBuffer->GetPitch () / 4;
-	u32 *pDst = FrameBufferWords ();
-
-	for (unsigned nLine = 0; nLine + 1 < nLines; nLine++)
-	{
-		const unsigned nFrom = STATUS_TOP + (nLine + 1) * nLineHeight;
-		const unsigned nTo   = STATUS_TOP + nLine * nLineHeight;
-		memmove (pDst + nTo * nPitch, pDst + nFrom * nPitch,
-			 nLineHeight * nPitch * sizeof (u32));
-	}
-
-	// Clear the last line before it is written again.
-	FillRect (pDst, nPitch, 0, STATUS_TOP + (nLines - 1) * nLineHeight,
-		  s_nModeWidth, nLineHeight, 0x00000000);
-
-	s_nStatusCursor = nLines - 1;
-	s_bStatusScrolled = true;
-}
 
 // ---------------------------------------------------------------------------
 // Resampling: integer and fractional are not the same problem
@@ -755,6 +733,34 @@ boolean BareVideoInit (unsigned nWidth, unsigned nHeight)
 	// page would be writing past the end of the buffer if it was not.
 	BareVideoFill (0x00000000);
 
+	// --- .72 probes: what the firmware actually gave us --------------------
+	// .71 wrote these two with CLogger::Write() and nobody ever saw them: the
+	// logger's target is Circle's console, which is a *different* frame buffer
+	// from this one (that is the whole reason the boot log appears on top of the
+	// picture).  A probe that goes to the log of the layer you are debugging is
+	// not a probe.  They go through the status overlay now, which writes here:
+	//
+	//   "fb: virtual Wx2H"         -> the firmware granted the second page
+	//   "fb: virtual WxH"          -> it granted one page only
+	//   "fb: size < pitch*H"       -> the buffer cannot hold the mode asked for
+	//
+	// They are temporary and come out once the mode change is settled.
+	{
+		char Probe[96];
+
+		snprintf (Probe, sizeof Probe, "fb: real %ux%u pitch %u size %u",
+			  s_nModeWidth, s_nModeHeight,
+			  s_pFrameBuffer->GetPitch (),
+			  static_cast<unsigned> (s_pFrameBuffer->GetSize ()));
+		BareVideoStatusPrint (Probe);
+
+		snprintf (Probe, sizeof Probe, "fb: virtual %ux%u vb %u",
+			  s_pFrameBuffer->GetVirtWidth (),
+			  s_pFrameBuffer->GetVirtHeight (),
+			  s_nModeHeight * 2);
+		BareVideoStatusPrint (Probe);
+	}
+
 	return TRUE;
 }
 
@@ -779,6 +785,11 @@ static void PresentVisible (const u32 *pPixels, unsigned nWidth, unsigned nHeigh
 // slots are repainted on every frame, over the picture.
 void DrawSlot (unsigned nSlot);
 
+// Paints black everything the destination rectangle does not cover.  Used by
+// the present path (see the wipe in BareVideoPresent), declared here because it
+// is used above its definition.
+static void BareVideoClearOutside (void);
+
 // Erases one line slot: paints its remembered rectangle black and forgets its
 // text.  Declared here for the same reason as DrawSlot() - it is used above its
 // definition, by the panel switch.
@@ -793,14 +804,33 @@ void BareVideoPresent (const u32 *pPixels, unsigned nWidth, unsigned nHeight,
 		       unsigned nPitchBytes)
 {
 	// First real frame from the emulator: the screen is DOS's from now on.
-	// Wipe once (so the boot log does not sit on top of the C: prompt) and stop
-	// writing status lines.  The same information stays in the logger, which
-	// goes to tty1 and to the serial port.
+	// Stop writing status lines - but do NOT wipe the screen here.
+	//
+	// It used to call BareVideoFill(0) at this point, "so the boot log does not
+	// sit on top of the C: prompt".  That was wrong twice over, and .69 showed
+	// it as a black screen with nothing on it:
+	//
+	//   * the line that provokes this is DOS's own log (see the [libretro
+	//     DEBUG] ones in Circle's log), which is written through CLogger - and
+	//     CLogger's target is Circle's console, a *different* frame buffer.  So
+	//     this wipe removed the port's own status text and left the console's
+	//     text exactly where it was.  What it cleaned was the one thing that was
+	//     not in the way;
+	//   * and it did it on the FIRST frame, which is not DOS's C: prompt but
+	//     whatever the core had ready after retro_load_game - in practice a
+	//     black screen.  The boot produced a wipe, and then a wait of seconds
+	//     before anything was drawn into it.
+	//
+	// The order that does what the comment always wanted: let the first frame be
+	// drawn, and wipe once *behind* it (the flag below), so the boot text goes
+	// and the picture that replaced it stays.  Two presents of margin, because a
+	// mode can arrive twice (one from retro_get_system_av_info, one from the
+	// first render).
 	if (s_bStatusEnabled && pPixels != nullptr && nWidth != 0 && nHeight != 0)
 	{
 		s_bStatusEnabled = false;
 		s_bStatusScrolled = true;
-		BareVideoFill (0x00000000);
+		s_nWipeAfterPresents = 2;
 	}
 
 	if (pPixels == nullptr)
@@ -837,6 +867,52 @@ void BareVideoPresent (const u32 *pPixels, unsigned nWidth, unsigned nHeight,
 	}
 
 	PresentVisible (pPixels, nWidth, nHeight, nPitchBytes);
+
+	// --- heartbeat ---------------------------------------------------------
+	// One line per 120 presents, for the whole first second of the picture, and
+	// nothing after that.  The .69 boot ended on a black screen and nothing on
+	// it said whether the core was presenting black frames, presenting nothing,
+	// or presenting into memory that is not on screen - three very different
+	// faults that look identical from the sofa.  These numbers tell them apart:
+	//
+	//   "presents 120 640x400" repeating  -> the core is alive and drawing
+	//   it stops after the first line      -> the core stopped after one frame
+	//   it never appears at all            -> BareVideoPresent is not called
+	//
+	// Only during the first second, so a release build does not scribble on the
+	// screen for ever.
+	// Same lesson as the probes: written through the overlay, because the logger
+	// goes to Circle's console and the console is not this frame buffer.
+	s_nPresentedSinceStart++;
+	if (s_nPresentedSinceStart <= 120 && s_nPresentedSinceStart % 40 == 0)
+	{
+		char Beat[64];
+		snprintf (Beat, sizeof Beat, "picture: %u presents, source %ux%u",
+			  s_nPresentedSinceStart, nWidth, nHeight);
+		BareVideoStatusPrint (Beat);
+	}
+
+	// The wipe described above, now that the picture is on screen, and it touches
+	// ONLY the margins - never a pixel of the picture.  .70 painted the mode
+	// black and presented the frame again, which is a black frame on the wire
+	// between two identical pictures: that is the extra flash the boot showed,
+	// "welcome -> black -> welcome".
+	if (s_nWipeAfterPresents > 0)
+	{
+		s_nWipeAfterPresents = 0;
+
+		// Only the margins, and after the picture: no black frame, no second
+		// present of the same frame, no flash.  .70 did "fill + present again"
+		// and that is the black frame the boot was showing between two copies
+		// of the welcome screen.
+		BareVideoClearOutside ();
+
+		// The slots live in the bottom margin that was just cleared.
+		for (unsigned nSlot = 0; nSlot < MaxSlots; nSlot++)
+		{
+			DrawSlot (nSlot);
+		}
+	}
 
 	// The line slots are NOT repainted here any more, and that is the .57 fix
 	// for the flicker rather than an omission.
@@ -1141,8 +1217,56 @@ void BareVideoRepaint (void)
 	// were not covered by anything this repaint is undoing (see the note in
 	// BareVideoPresent), so redrawing them here would be work with no effect.
 	PresentVisible (s_pMirror, s_nMirrorWidth, s_nMirrorHeight, nPitchBytes);
+
+	// And the line slots, after the picture and not before: DrawSlot() paints
+	// in the reserved strip, and anything drawn before PresentVisible() is a
+	// black rectangle by the time the frame is on screen.  BareVideoPresent()
+	// deliberately does not repaint them (they only change once a second), so
+	// this is the path that puts them back when something else has scribbled
+	// over the strip - the wipe at the start of a mode, and the log lines that
+	// the fuzzing probe below writes there.
+	for (unsigned nSlot = 0; nSlot < MaxSlots; nSlot++)
+	{
+		DrawSlot (nSlot);
+	}
 }
 
+// ---------------------------------------------------------------------------
+// THE FUZZ
+// ---------------------------------------------------------------------------
+//
+// Evidence first, because this one is not a theory.  Two frame-buffer captures
+// on a Pi 3 at 800x600, and one at 1024x768 (SHOT0007.png), measured:
+//
+//   * 800x600: 35 "text" bands in the left margin, pitch 14.3 px (median 16).
+//   * 800x600, other boot: 41 bands, pitch 13.0 px.
+//   * 1024x768: NOTHING anywhere for 335 rows, then a sprinkle from row 384,
+//     and from row 656 to 767 the whole width (x 0..1023) full of dots and
+//     dashes - inside and outside the picture.
+//
+// Three things follow from those numbers and not from an opinion:
+//
+//   1. The pattern is not Circle's text.  8x16 with 2 px of gap gives a pitch
+//      of 18, and 8x8 is the DOS font, which the panel does not use.  Neither
+//      capture has 18.
+//   2. It does not scale with the mode: 30 KB of "content" in the bottom of a
+//      1024x768 against 6 KB at 800x600, in a *different* place.  Text would
+//      land in the same rows of the same layout.
+//   3. It is a repeating, dense, dotted pattern with the span of a few rows -
+//      "unos 10 frames que se repiten" was the description that started this,
+//      and it is the description of a small pattern tiled over and over.
+//
+// The only writer in this port that can produce that is the status column when
+// its line cursor runs away: BareVideoStatus(nLine, …) computes
+// y = STATUS_TOP + nLine * nLineHeight and clamps the *drawing* by nY, so a
+// cursor that grows past the last line still writes rows.  Nothing bounded
+// the cursor, and the core,
+// through BareLog → BareVideoStatusPrint, is the one feeding it.
+//
+// So: bound it.  A status line beyond the last line the mode can show replaces
+// the last one instead of being written past it, which is what the scrolling
+// column is supposed to do anyway.  An emulator that logs forty lines a second
+// for ever then costs forty overwrites of the same row, not forty new rows.
 unsigned BareVideoStatusLines (void)
 {
 	if (s_pFrameBuffer == nullptr)
@@ -1201,12 +1325,41 @@ void BareVideoStatusPrint (const char *pText)
 		return;
 	}
 
-	if (s_nStatusCursor >= BareVideoStatusLines ())
+	// One line of history, and no more than the screen has rows for.
+	//
+	// The failure this closes, measured and not guessed: see the long note above
+	// ("THE FUZZ").  The column used to scroll one line per message, so a source
+	// that logs faster than a human reads made the column
+	// churn - and the pointer to what is happening on screen is gone the moment
+	// the message that matters arrives.  Here, a message that arrives when the
+	// column is already full simply replaces the last line: the newest thing is
+	// always the one at the bottom, and the total amount of drawing per second
+	// stops depending on how noisy the core is.
+	const unsigned nLines = BareVideoStatusLines ();
+	if (nLines == 0)
 	{
-		ScrollStatus ();
+		return;
 	}
 
-	BareVideoStatus (s_nStatusCursor++, pText);
+	if (s_nStatusCursor >= nLines)
+	{
+		s_nStatusCursor = nLines - 1;
+	}
+
+	BareVideoStatus (s_nStatusCursor, pText);
+
+	if (s_nStatusCursor + 1 < nLines)
+	{
+		s_nStatusCursor++;
+	}
+	else
+	{
+		// The column is full: the next line replaces this one instead of
+		// scrolling.  s_bStatusScrolled says the top line is no longer the
+		// first message, which is what other code asks before trusting the
+		// column as a history.
+		s_bStatusScrolled = true;
+	}
 }
 
 void BareVideoStatus (unsigned nLine, const char *pText)
@@ -1224,8 +1377,23 @@ void BareVideoStatus (unsigned nLine, const char *pText)
 		return;
 	}
 
-	DrawText (FrameBufferWords (), s_pFrameBuffer->GetPitch () / 4, STATUS_X, nY,
-		  pText, 0x00FFFFFF);
+	u32 *pDst = FrameBufferWords ();
+	const u32 nPitch = s_pFrameBuffer->GetPitch () / 4;
+
+	// Erase the line first, right edge of the mode included.
+	//
+	// Without this the new text is drawn on top of the old one and the two
+	// overlap character by character - "Var±ablerGbla&ka±uA±uuuuuu&" in the
+	// photo of the boot, which is "Variable dosbox::machine ..." and the next
+	// message occupying the same pixels.  It never showed before because the
+	// column scrolled: every message moved the text up, so a line was only ever
+	// written once.  Since .72 the newest message REPLACES the last one (that is
+	// what stops a noisy core from churning the screen), so the same line is now
+	// written over and over, and "over and over" needs an erase in between.
+	FillRect (pDst, nPitch, STATUS_X, nY, s_nModeWidth - STATUS_X,
+		  s_Font.GetCharHeight (), 0x00000000);
+
+	DrawText (pDst, nPitch, STATUS_X, nY, pText, 0x00FFFFFF);
 }
 
 void BareVideoFill (u32 nColor)
@@ -1235,9 +1403,74 @@ void BareVideoFill (u32 nColor)
 		return;
 	}
 
-	// Both pages, so that flipping later does not reveal stale content.
-	FillRect (FrameBufferWords (), s_pFrameBuffer->GetPitch () / 4, 0, 0,
-		  s_nModeWidth, s_nModeHeight, nColor);
+	// The *whole* buffer, virtual size included: both pages.
+	//
+	// This used to say "Both pages" and then fill s_nModeWidth x s_nModeHeight at
+	// offset 0, which is one page.  BareVideoInit() asks the firmware for a
+	// virtual height of twice the physical one, so when the firmware grants it
+	// the second page is real memory that nothing was clearing - and the moment
+	// anything offsets the scanout into it (the firmware doing its own output
+	// switch after a mode change is enough; this port never calls
+	// SetVirtualOffset()), what is on screen is whatever was in that memory.
+	//
+	// GetSize() is the buffer the firmware actually allocated, which is the only
+	// honest bound here: the virtual geometry is what was *asked for*, and this
+	// comment block in BareVideoInit already records that the firmware sometimes
+	// cannot back it.
+	const u32 nPitchBytes = s_pFrameBuffer->GetPitch ();
+	const u32 nSize = s_pFrameBuffer->GetSize ();
+	if (nPitchBytes == 0 || nSize == 0)
+	{
+		return;
+	}
+
+	u32 *pWords = FrameBufferWords ();
+	const u32 nWords = nSize / static_cast<u32> (sizeof (u32));
+	for (u32 nI = 0; nI < nWords; nI++)
+	{
+		pWords[nI] = nColor;
+	}
+
+	// Circle maps normal RAM as cacheable, and this is the one write in the
+	// port that fills megabytes at once, right in front of a scanout that does
+	// not read through the CPU cache.  The old single-page fill was small
+	// enough to wash out on its own; a 7 MB one is not, and a "cleared" screen
+	// that is only cleared in the cache is a garbage screen with extra steps.
+	// Per present this costs a few hundred microseconds, once per mode change.
+	CleanAndInvalidateDataCacheRange (s_pFrameBuffer->GetBuffer (), nSize);
+}
+
+/// \brief Paint black everything the picture does not cover.
+///
+/// Four rectangles around the destination rectangle - top, bottom, left, right
+/// - and never a pixel inside it.  That is the whole point: the alternative
+/// (fill the mode black and draw the picture again) puts a black frame on the
+/// screen for one refresh, which is exactly the "welcome -> black -> welcome"
+/// the boot was showing.  This removes the boot text that is in the margins
+/// without ever showing an empty screen.
+static void BareVideoClearOutside (void)
+{
+	if (s_pFrameBuffer == nullptr || s_nDstWidth == 0 || s_nDstHeight == 0)
+	{
+		return;
+	}
+
+	const u32 nPitch = s_pFrameBuffer->GetPitch () / 4;
+	u32 *pDst = FrameBufferWords ();
+
+	// Above and below the picture, the full width of the mode.
+	FillRect (pDst, nPitch, 0, 0, s_nModeWidth, s_nDstY, 0x00000000);
+	FillRect (pDst, nPitch, 0, s_nDstY + s_nDstHeight, s_nModeWidth,
+		  s_nModeHeight > s_nDstY + s_nDstHeight
+			  ? s_nModeHeight - (s_nDstY + s_nDstHeight) : 0,
+		  0x00000000);
+
+	// And the two side margins, only as tall as the picture.
+	FillRect (pDst, nPitch, 0, s_nDstY, s_nDstX, s_nDstHeight, 0x00000000);
+	FillRect (pDst, nPitch, s_nDstX + s_nDstWidth, s_nDstY,
+		  s_nModeWidth > s_nDstX + s_nDstWidth
+			  ? s_nModeWidth - (s_nDstX + s_nDstWidth) : 0,
+		  s_nDstHeight, 0x00000000);
 }
 
 void BareVideoShowMessage (const char *pText)
@@ -1274,20 +1507,41 @@ boolean BareVideoScreenshot (void)
 		return FALSE;
 	}
 
-	// Numbered, and never overwritten: filesystem writes on a FAT card that
-	// has been pulled out mid-write are a good way to lose the card, so a
-	// failed open just means "no screenshot", never a retry loop.
+	// Numbered, and NEVER overwritten - which is what this comment has always
+	// claimed and the code did not do.  The counter lives in RAM, so it
+	// starts at 0 on every boot, and fopen(…, "wb") truncates: the second boot
+	// destroyed SHOT0000 of the first, and a boot that takes two shots ended up
+	// with one file.  .70: the name is only accepted if the file does not exist
+	// yet, and the check is done by trying to *read* it - on FatFs there is no
+	// O_EXCL, and fopen("rb") is the only honest way to ask "is this name free?"
+	// without creating something.
 	static unsigned s_nShot = 0;
 	char Path[40];
-	for (unsigned nTry = 0; nTry < 100; nTry++)
+	boolean bOpened = FALSE;
+	FILE *pFile = nullptr;
+	for (unsigned nTry = 0; nTry < 100 && !bOpened; nTry++)
 	{
 		snprintf (Path, sizeof Path, "SD:/DOSBOX/SHOT%04u.BMP", s_nShot++);
-		FILE *pFile = fopen (Path, "wb");
-		if (pFile == nullptr)
+
+		FILE *pExists = fopen (Path, "rb");
+		if (pExists != nullptr)
 		{
-			continue;
+			fclose (pExists);
+			continue;		// that number is taken: next one
 		}
 
+		pFile = fopen (Path, "wb");
+		bOpened = pFile != nullptr ? TRUE : FALSE;
+	}
+
+	if (!bOpened)
+	{
+		CLogger::Get ()->Write (FromVideo, LogWarning,
+					"screenshot: no free SHOTnnnn.BMP name (100 tried)");
+		return FALSE;
+	}
+
+	{
 		const unsigned nRowBytes = (s_nModeWidth * 3 + 3) & ~3u;
 		const u32 nImageBytes = nRowBytes * s_nModeHeight;
 		u8 Header[54] = { 0 };

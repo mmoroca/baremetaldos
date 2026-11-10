@@ -26,6 +26,24 @@ hdmi_group=1
 hdmi_mode=16
 hdmi_drive=2
 
+# Overscan.  This is not cosmetic and it was the 1824x984.
+#
+# In CEA modes (hdmi_group=1, i.e. what a TV uses) the firmware defaults to a
+# 48-pixel overscan border on all four edges, and the frame buffer it allocates
+# is "the display's size minus the overscan" - that is the wording in the
+# firmware's own config.txt template.  On 1080p that is 1920-96 = 1824 wide and
+# 1080-96 = 984 tall, which is the size this port printed on the board
+# ("Circle's console is 1824x984") when cmdline.txt did not ask for a mode.
+#
+# Disabling it gives the display the whole 1920x1080 and the emulator the whole
+# screen.  If your TV then crops the outer few pixels of the picture (some sets
+# overscan no matter what the source says), the other way round is to leave
+# overscan alone and set the four edges explicitly, e.g.
+#   overscan_left=0  overscan_right=0  overscan_top=0  overscan_bottom=0
+# or a small negative value to zoom out.  It has to be *before* any [section]
+# line: the firmware applies this globally.
+disable_overscan=1
+
 # Sound.  The emulator drives the SoC's audio hardware directly (Circle's HDMI
 # or PWM device), so the firmware needs the audio subsystem enabled - that is
 # what dtparam=audio=on does - but it is *not* the firmware that plays anything.

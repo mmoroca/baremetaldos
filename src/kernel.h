@@ -100,9 +100,16 @@ private:
 	/// and then silence.
 	CScheduler mScheduler;
 
-	/// \brief Say something on screen and on the serial port before the
-	///	   emulator takes the display over.
-	void Banner (const char *pLine);
+	/// \brief How much of the boot is written to the screen once the port owns
+	///	   it: 2 = everything, 1 = this port's lines only (boot.conf
+	///	   boot_log=quiet), 0 = nothing (boot_log=off).  Decided once, from
+	///	   boot.conf, before the display is created.
+	unsigned m_nBootLogLevel;
+
+	/// \brief Set while a message must be shown even with boot_log = off.
+	///	   Used by the display-mismatch check: a boot that stops with nothing
+	///	   on screen looks like a dead card.
+	boolean m_bReportForced;
 
 	/// \brief Decide what to boot: the .conf if present, otherwise the game
 	///	   directory.  Returns a static string, or nullptr when there is
