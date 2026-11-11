@@ -9,12 +9,19 @@ build/
 *.hex
 
 # fetched sources and toolchain-side build tree
-third_party/
-sdcard/
+#
+# No trailing slash, and that is deliberate: `third_party/` does not match a
+# SYMLINK called third_party, because a symlink is not a directory to git.  In
+# the clean clone of .80 the two symlinks to the old tree showed up as untracked
+# and would have gone into the commit as links to /home/<someone>/... .  Without
+# the slash the pattern matches the name whether it is a directory, a file or a
+# link.
+third_party
+sdcard
 
 # the Arm toolchain, unpacked by scripts/setup.sh.  It lives here on purpose
 # (self-contained tree), so it is not something a clone has to install.
-opt/
+opt
 
 # python bytecode from the check generators
 __pycache__/
@@ -31,6 +38,12 @@ docs/
 AGENTS.md
 NOTAS-TECNICAS.md
 
-# local helper scripts, never published
+# Working scripts that live OUTSIDE the tree (in ~/entrega/).  They are listed
+# here because one of them -- crear-mensaje-commit.sh -- was committed into the
+# root of the published repo in v0.78 by a `git add -A` (see AGENTS.md 17.21 and
+# entrega/REVISION-REPO-0.78.md).  It was removed again in 444e70d ("Remove a
+# local helper script that should never have been committed"), but .gitignore
+# does not un-track anything by itself: these two lines are what keeps it out
+# next time, whatever happens to the local .git.
 crear-mensaje-commit.sh
 hacer-imagen.sh

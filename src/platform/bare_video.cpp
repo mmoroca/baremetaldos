@@ -121,6 +121,21 @@ boolean s_bLastFrameHashValid = FALSE;
 // (which arrive through BareLog) share one column and cannot overlap.
 unsigned s_nStatusCursor = 0;
 
+// The top two lines after BareVideoStatusReset() ("BM-DOS ..." and
+// "by @mmoroca ...") stay pinned at the top of the screen inside a 4-row
+// single-line MS-DOS box (rows 0..3); every subsequent status line flows
+// through the scrolling region below it (rows 4 .. nLines-1).
+constexpr unsigned HEADER_TEXT_LINES = 2;
+constexpr unsigned HEADER_BOX_LINES  = HEADER_TEXT_LINES + 2;
+constexpr size_t   STATUS_LINE_CHARS = 128;
+
+bool     s_bHeaderArmed = false;
+unsigned s_nPinnedCount = 0;
+char     s_PinnedLines[HEADER_TEXT_LINES][STATUS_LINE_CHARS];
+
+unsigned s_nScrollCount = 0;
+char     s_ScrollLines[STATUS_MAX_LINES][STATUS_LINE_CHARS];
+
 // The status line.  Off by default: it is a diagnostic, and a diagnostic drawn
 // over the picture is something you turn on when you want it.  The PetSis key
 // toggles it (see bare_libretro.cpp for the key, kernel.cpp for the drawing).
@@ -442,6 +457,38 @@ void FillRect (u32 *pDst, unsigned nPitch, unsigned nX, unsigned nY,
 	}
 }
 
+// CP437 single-line box-drawing glyphs (┌ ─ ┐ │ └ ┘), rendered across the full
+// line pitch (nCharHeight + 2) so vertical bars connect from row to row with
+// no 2-pixel inter-line gap.
+bool IsBoxGlyph (u8 ch)
+{
+	return ch == 0xC4 || ch == 0xB3 || ch == 0xDA || ch == 0xBF
+	       || ch == 0xC0 || ch == 0xD9;
+}
+
+u32 GetBoxGlyphBits (u8 ch, unsigned nLine, unsigned nCharHeight)
+{
+	const unsigned nMid = nCharHeight / 2;
+
+	switch (ch)
+	{
+	case 0xC4:	// ─
+		return nLine == nMid ? 0xFFU : 0x00U;
+	case 0xB3:	// │
+		return 0x10U;
+	case 0xDA:	// ┌
+		return nLine < nMid ? 0x00U : (nLine == nMid ? 0x1FU : 0x10U);
+	case 0xBF:	// ┐
+		return nLine < nMid ? 0x00U : (nLine == nMid ? 0xF0U : 0x10U);
+	case 0xC0:	// └
+		return nLine < nMid ? 0x10U : (nLine == nMid ? 0x1FU : 0x00U);
+	case 0xD9:	// ┘
+		return nLine < nMid ? 0x10U : (nLine == nMid ? 0xF0U : 0x00U);
+	default:
+		return 0x00U;
+	}
+}
+
 // Circle's font puts the *leftmost* pixel of a glyph in the most significant
 // bit of the line: CCharGenerator::GetPixel() tests (Line & (1 << (width-1-x))).
 // Getting this backwards mirrors every character, which is exactly what the
@@ -452,8 +499,9 @@ void DrawText (u32 *pDst, unsigned nPitch, unsigned nX, unsigned nY,
 {
 	const unsigned nCharWidth = s_Font.GetCharWidth ();
 	const unsigned nCharHeight = s_Font.GetCharHeight ();
+	const unsigned nLineHeight = nCharHeight + 2;
 
-	for (unsigned nLine = 0; nLine < nCharHeight; nLine++)
+	for (unsigned nLine = 0; nLine < nLineHeight; nLine++)
 	{
 		if (nY + nLine >= s_nModeHeight)
 		{
@@ -463,7 +511,10 @@ void DrawText (u32 *pDst, unsigned nPitch, unsigned nX, unsigned nY,
 		unsigned nPosX = nX;
 		for (const char *p = pText; *p != '\0'; p++, nPosX += nCharWidth)
 		{
-			const u32 nBits = s_Font.GetPixelLine (*p, nLine);
+			const u8 ch = static_cast<u8> (*p);
+			const u32 nBits = IsBoxGlyph (ch)
+					? GetBoxGlyphBits (ch, nLine, nCharHeight)
+					: (nLine < nCharHeight ? s_Font.GetPixelLine (*p, nLine) : 0U);
 
 			for (unsigned nBit = 0; nBit < nCharWidth; nBit++)
 			{
@@ -1281,6 +1332,72 @@ unsigned BareVideoStatusLines (void)
 	return nLines < STATUS_MAX_LINES ? nLines : STATUS_MAX_LINES;
 }
 
+static void DrawStatusHeaderBox (void)
+{
+	const size_t nLen0  = strlen (s_PinnedLines[0]);
+	const size_t nLen1  = strlen (s_PinnedLines[1]);
+	size_t       nInner = nLen0 > nLen1 ? nLen0 : nLen1;
+
+	const unsigned nCharW = s_Font.GetCharWidth ();
+	const size_t nMaxScreenCols = (s_nModeWidth > STATUS_X && nCharW != 0)
+				    ? (s_nModeWidth - STATUS_X) / nCharW
+				    : 80;
+
+	size_t nMaxInner = STATUS_LINE_CHARS - 5;
+	if (nMaxScreenCols > 4 && nMaxScreenCols - 4 < nMaxInner)
+	{
+		nMaxInner = nMaxScreenCols - 4;
+	}
+	if (nInner > nMaxInner)
+	{
+		nInner = nMaxInner;
+	}
+
+	char Row[STATUS_LINE_CHARS];
+
+	// Top border: ┌───...───┐
+	Row[0] = '\xDA';
+	for (size_t i = 0; i < nInner + 2; ++i)
+	{
+		Row[1 + i] = '\xC4';
+	}
+	Row[1 + nInner + 2] = '\xBF';
+	Row[2 + nInner + 2] = '\0';
+	BareVideoStatus (0, Row);
+
+	// Two pinned header lines: │ text... │
+	for (unsigned k = 0; k < HEADER_TEXT_LINES; ++k)
+	{
+		const size_t nTextLen = strlen (s_PinnedLines[k]);
+		const size_t nCopy    = nTextLen < nInner ? nTextLen : nInner;
+
+		Row[0] = '\xB3';
+		Row[1] = ' ';
+		if (nCopy > 0)
+		{
+			memcpy (Row + 2, s_PinnedLines[k], nCopy);
+		}
+		for (size_t i = nCopy; i < nInner; ++i)
+		{
+			Row[2 + i] = ' ';
+		}
+		Row[2 + nInner] = ' ';
+		Row[3 + nInner] = '\xB3';
+		Row[4 + nInner] = '\0';
+		BareVideoStatus (1 + k, Row);
+	}
+
+	// Bottom border: └───...───┘
+	Row[0] = '\xC0';
+	for (size_t i = 0; i < nInner + 2; ++i)
+	{
+		Row[1 + i] = '\xC4';
+	}
+	Row[1 + nInner + 2] = '\xD9';
+	Row[2 + nInner + 2] = '\0';
+	BareVideoStatus (3, Row);
+}
+
 /// \brief Let the status overlay draw again.
 ///
 /// The screen belongs to the emulator once it presents frames, and the overlay
@@ -1295,8 +1412,27 @@ void BareVideoStatusEnable (void)
 	{
 		BareVideoFill (0x00000000);
 		s_bStatusEnabled = true;
+		if (s_bHeaderArmed && s_nPinnedCount >= HEADER_TEXT_LINES)
+		{
+			// The fill above wiped the screen, so the column has to be
+			// replayed: the pinned box first, then the scrolling lines the
+			// column still remembers.  Nothing is forgotten here - the amount
+			// of history the screen can hold is what it always was.
+			DrawStatusHeaderBox ();
+			const unsigned nLines = BareVideoStatusLines ();
+			const unsigned nMaxScroll = (nLines > HEADER_BOX_LINES)
+						  ? nLines - HEADER_BOX_LINES : 0;
+			for (unsigned i = 0; i < s_nScrollCount && i < nMaxScroll; ++i)
+			{
+				BareVideoStatus (HEADER_BOX_LINES + i, s_ScrollLines[i]);
+			}
+			s_nStatusCursor = HEADER_BOX_LINES + s_nScrollCount;
+		}
+		else
+		{
+			s_nStatusCursor = 0;
+		}
 		s_bStatusScrolled = false;
-		s_nStatusCursor = 0;
 	}
 }
 
@@ -1316,6 +1452,13 @@ void BareVideoStatusReset (void)
 	// BareVideoFill() and it should say why.
 	s_nStatusCursor = 0;
 	s_bStatusScrolled = false;
+	s_bHeaderArmed = true;
+	s_nPinnedCount = 0;
+	s_nScrollCount = 0;
+	for (unsigned k = 0; k < HEADER_TEXT_LINES; ++k)
+	{
+		s_PinnedLines[k][0] = '\0';
+	}
 }
 
 void BareVideoStatusPrint (const char *pText)
@@ -1325,40 +1468,73 @@ void BareVideoStatusPrint (const char *pText)
 		return;
 	}
 
-	// One line of history, and no more than the screen has rows for.
-	//
-	// The failure this closes, measured and not guessed: see the long note above
-	// ("THE FUZZ").  The column used to scroll one line per message, so a source
-	// that logs faster than a human reads made the column
-	// churn - and the pointer to what is happening on screen is gone the moment
-	// the message that matters arrives.  Here, a message that arrives when the
-	// column is already full simply replaces the last line: the newest thing is
-	// always the one at the bottom, and the total amount of drawing per second
-	// stops depending on how noisy the core is.
 	const unsigned nLines = BareVideoStatusLines ();
 	if (nLines == 0)
 	{
 		return;
 	}
 
-	if (s_nStatusCursor >= nLines)
+	// Before BareVideoStatusReset() (early framebuffer probes), draw directly.
+	if (!s_bHeaderArmed)
 	{
-		s_nStatusCursor = nLines - 1;
+		if (s_nStatusCursor >= nLines)
+		{
+			s_nStatusCursor = nLines - 1;
+		}
+		BareVideoStatus (s_nStatusCursor, pText);
+		if (s_nStatusCursor + 1 < nLines)
+		{
+			s_nStatusCursor++;
+		}
+		return;
 	}
 
-	BareVideoStatus (s_nStatusCursor, pText);
-
-	if (s_nStatusCursor + 1 < nLines)
+	// Capture the first two lines after BareVideoStatusReset() ("BM-DOS ..."
+	// and "by @mmoroca ...") into the fixed top MS-DOS frame (rows 0..3).
+	if (s_nPinnedCount < HEADER_TEXT_LINES)
 	{
-		s_nStatusCursor++;
+		strncpy (s_PinnedLines[s_nPinnedCount], pText, STATUS_LINE_CHARS - 1);
+		s_PinnedLines[s_nPinnedCount][STATUS_LINE_CHARS - 1] = '\0';
+		s_nPinnedCount++;
+		DrawStatusHeaderBox ();
+		s_nStatusCursor = HEADER_BOX_LINES;
+		return;
+	}
+
+	if (nLines <= HEADER_BOX_LINES)
+	{
+		return;
+	}
+
+	const unsigned nMaxScroll = nLines - HEADER_BOX_LINES;
+
+	if (s_nScrollCount < nMaxScroll)
+	{
+		strncpy (s_ScrollLines[s_nScrollCount], pText, STATUS_LINE_CHARS - 1);
+		s_ScrollLines[s_nScrollCount][STATUS_LINE_CHARS - 1] = '\0';
+		BareVideoStatus (HEADER_BOX_LINES + s_nScrollCount,
+				 s_ScrollLines[s_nScrollCount]);
+		s_nScrollCount++;
+		s_nStatusCursor = HEADER_BOX_LINES + s_nScrollCount;
 	}
 	else
 	{
-		// The column is full: the next line replaces this one instead of
-		// scrolling.  s_bStatusScrolled says the top line is no longer the
-		// first message, which is what other code asks before trusting the
-		// column as a history.
+		// Scrolling region is full: shift lines up by one row and redraw
+		// rows HEADER_BOX_LINES .. nLines-1 while keeping the top header
+		// box fixed at rows 0..3.
 		s_bStatusScrolled = true;
+		for (unsigned i = 0; i + 1 < nMaxScroll; ++i)
+		{
+			memcpy (s_ScrollLines[i], s_ScrollLines[i + 1], STATUS_LINE_CHARS);
+		}
+		strncpy (s_ScrollLines[nMaxScroll - 1], pText, STATUS_LINE_CHARS - 1);
+		s_ScrollLines[nMaxScroll - 1][STATUS_LINE_CHARS - 1] = '\0';
+
+		for (unsigned i = 0; i < nMaxScroll; ++i)
+		{
+			BareVideoStatus (HEADER_BOX_LINES + i, s_ScrollLines[i]);
+		}
+		s_nStatusCursor = nLines - 1;
 	}
 }
 
@@ -1379,21 +1555,23 @@ void BareVideoStatus (unsigned nLine, const char *pText)
 
 	u32 *pDst = FrameBufferWords ();
 	const u32 nPitch = s_pFrameBuffer->GetPitch () / 4;
+	const u32 nEraseH = (nY + nLineHeight <= s_nModeHeight)
+			  ? nLineHeight
+			  : (s_nModeHeight - nY);
 
-	// Erase the line first, right edge of the mode included.
-	//
-	// Without this the new text is drawn on top of the old one and the two
-	// overlap character by character - "Var±ablerGbla&ka±uA±uuuuuu&" in the
-	// photo of the boot, which is "Variable dosbox::machine ..." and the next
-	// message occupying the same pixels.  It never showed before because the
-	// column scrolled: every message moved the text up, so a line was only ever
-	// written once.  Since .72 the newest message REPLACES the last one (that is
-	// what stops a noisy core from churning the screen), so the same line is now
-	// written over and over, and "over and over" needs an erase in between.
+	// Erase the full line band (including the 2-pixel inter-line gap) first.
 	FillRect (pDst, nPitch, STATUS_X, nY, s_nModeWidth - STATUS_X,
-		  s_Font.GetCharHeight (), 0x00000000);
+		  nEraseH, 0x00000000);
 
 	DrawText (pDst, nPitch, STATUS_X, nY, pText, 0x00FFFFFF);
+
+	const u32 nPitchBytes = s_pFrameBuffer->GetPitch ();
+	if (nPitchBytes != 0)
+	{
+		CleanAndInvalidateDataCacheRange (
+			s_pFrameBuffer->GetBuffer () + nY * nPitchBytes,
+			nEraseH * nPitchBytes);
+	}
 }
 
 void BareVideoFill (u32 nColor)

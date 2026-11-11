@@ -24,6 +24,7 @@ compila para la Pi 3, la familia Pi 4 (incluidas la 400 y la CM4) y la Pi 5.
 - [Configuración: `boot.conf`](#configuración-bootconf)
 - [Configuración: `cmdline.txt`](#configuración-cmdlinetxt)
 - [Configuración: `config.txt` y `dosbox.conf`](#configuración-configtxt-y-dosboxconf)
+- [MIDI con SoundFont](#midi-con-soundfont)
 - [Teclas](#teclas)
 - [El panel de estado](#el-panel-de-estado)
 - [Cómo funciona](#cómo-funciona)
@@ -55,7 +56,8 @@ Lo que funciona hoy:
 | Teclado, ratón y mandos USB (HID) | funciona |
 | Governor del reloj ARM, 600 MHz en el prompt de DOS | funciona |
 | Panel de estado, capturas de pantalla, apagado seguro | funciona |
-| MIDI / MT-32 | no implementado (no hay emulación de MT-32 sin sistema operativo) |
+| MIDI con SoundFont (`.sf2`) sobre MPU-401 | funciona |
+| MT-32 / MT-32 ROM | no implementado (no hay emulación de MT-32 sin sistema operativo) |
 | CD-ROM, red, IPX, módem | no implementado |
 | Voodoo / 3dfx | no implementado |
 
@@ -524,6 +526,123 @@ reloj es del governor, y fijarlo le quitaría la decisión.
   más rápido para casi todo. `normal` fuerza el intérprete y sirve para comparar
   comportamientos.
 
+## MIDI con SoundFont
+
+Un juego de DOS que pide **General MIDI** por el MPU-401 suena con instrumentos
+reales leídos de un fichero `.sf2` (SoundFont) en la tarjeta, en vez de con la
+música OPL del Sound Blaster.  El sintetizador es **TinySoundFont** (`tsf.h`),
+compilado dentro del núcleo; la soundfont no se copia a RAM entera, se lee de la
+SD en bloques de 64 KB mientras se parsea.
+
+### Activarlo
+
+1. Copia el `.sf2` a `/dosbox/system/soundfonts/` en la tarjeta (o a donde
+   quieras: ver la tabla de rutas).
+2. En `dosbox.conf`:
+
+```ini
+[midi]
+mpu401=intelligent
+midiconfig=GeneralUser-GS.sf2
+```
+
+No viene ninguna soundfont en la imagen: pesan de 1 MB a varios cientos de MB y
+cada una tiene su propia licencia.  Sin `mpu401` o sin `midiconfig` el port no
+hace nada y la música sigue siendo la del Sound Blaster, que es lo que hay por
+defecto.
+
+`midiconfig` **no** configura un módulo MIDI externo, como en DOSBox de PC: aquí
+es el nombre (o la ruta) del `.sf2`.  La clave `mididevice` no la lee este port.
+
+### Qué nombre acepta `midiconfig`
+
+| Lo que escribes | Dónde se busca, en este orden |
+|---|---|
+| `SD:/musica/mi.sf2` | esa ruta, y la misma sin el prefijo `SD:` |
+| `/musica/mi.sf2` | `SD:/musica/mi.sf2` y después `/musica/mi.sf2` |
+| `mi.sf2` | `SD:/dosbox/system/soundfonts/mi.sf2`, `/dosbox/system/soundfonts/mi.sf2`, `SD:/mi.sf2` |
+
+Espacios al principio y al final se ignoran.
+
+### Lo que se ve en pantalla
+
+La carga ocurre una sola vez por arranque, antes de que el juego empiece, y deja
+estas líneas:
+
+```text
+Found midi soundfont, loading...
+SF2 31559 KB: 8.4 MB/s, 3836 ms SD, 602 ms tsf
+MIDI: loaded 'SD:/dosbox/system/soundfonts/GeneralUser-GS.sf2' (237 presets, 44100 Hz)
+```
+
+`MB/s`, `ms SD` y `ms tsf` separan el viaje a la tarjeta del parseo: si `ms tsf`
+es pequeño y `ms SD` enorme, el fichero es grande y la tarjeta lenta, no hay nada
+mal.  La línea sale **una vez por arranque**; la segunda pasada de inicialización
+del core reutiliza el sintetizador ya cargado en RAM.
+
+`MIXER /LISTMIDI` desde el prompt de DOS tiene que listar el canal:
+
+```text
+  TSF   SD:/dosbox/system/soundfonts/GeneralUser-GS.sf2 (237 presets)
+```
+
+### Cuánta RAM hace falta
+
+TinySoundFont convierte cada muestra de 16 bits en un `float`, así que el
+instrumento ocupa **el doble del tamaño del fichero** más un margen; el chequeo
+del port pregunta por dos veces y media el fichero (para los 31 559 KB de las
+pruebas, unos 77 MB).  En esta placa el heap **no
+devuelve NULL cuando se llena**: Circle entra en pánico con la reserva de 256 KB
+del heap bajo, así que el port pregunta cuánta memoria libre hay antes de
+empezar y, si el fichero no cabe, lo dice y sigue sin MIDI:
+
+```text
+MIDI: 'SD:/dosbox/system/soundfonts/enorme.sf2' too large for available RAM, not loading it
+```
+
+El juego conserva entonces su música OPL.  No hay un tamaño «recomendado»: el
+límite es la memoria que quede libre en ese arranque, y el port la pregunta en vez
+de suponerla.  Medido en la placa: un `.sf2` de 31 559 KB (GeneralUser GS) entra y
+carga en 3,8 s.
+
+### Errores de la tarjeta (y si es desgaste)
+
+De vez en cuando una lectura puede fallar en mitad del fichero:
+
+```text
+MIDI: SD read retried at 15168 KB (errno 5)
+SF2 31559 KB: 8.2 MB/s, 3901 ms SD, 604 ms tsf, 1 block retries
+```
+
+Eso es un corte de **E/S** de la tarjeta (`errno 5`, `EIO`), no del port: el
+lector pide un bloque, la tarjeta no lo entrega, y el port vuelve a pedirlo —en
+trozos más pequeños— antes de darse por vencido.  Si el reintento funciona, la
+carga sigue sin releer el fichero entero; sólo aparece el aviso.
+
+Los tres números que dicen si la tarjeta va a peor son el **contador de bloques
+reintentados**, la **posición** del aviso (`at N KB`) y el `MB/s`.  Mismo fichero,
+mismo arranque, misma tarjeta: si el contador sube de un arranque a otro, o el
+aviso sale siempre en el mismo KB, es la tarjeta o su contacto; si un día
+desaparece, fue un mal contacto.  Si los reintentos no bastan, el port cae al
+camino de lectura lento, lo dice, y la carga termina igual:
+
+```text
+MIDI: SF2 read stopped at 15168 of 31559 KB (errno 5)
+MIDI: block reader failed, retrying the plain way
+SF2 31559 KB: 3.2 MB/s, 9863 ms SD, 501 ms tsf (plain)
+```
+
+### Qué no hace
+
+- **MT-32**: no hay emulación de MT-32 ni carga de sus ROM.  Los juegos escritos
+  para MT-32 suenan con instrumentos General MIDI, que no es lo mismo.
+- **Chorus y reverb**: la copia de TinySoundFont que va dentro no los tiene
+  (no existen esas funciones en `tsf.h`), así que la soundfont suena seca.
+- **GS / XG extendidos**: se atienden los mensajes de reset (GM System On y GS
+  Reset) y los 16 canales con los bancos de la soundfont; no hay traducción de
+  GS/XG a bancos más allá de eso.
+- **Salida a un módulo MIDI externo**: no hay puerto MIDI serie ni USB MIDI.
+
 ## Teclas
 
 | Tecla | Qué hace |
@@ -682,6 +801,7 @@ make distclean       # borra build/ y third_party/ (conserva opt/)
 | `check-portorder` | cuándo puede anunciarse el puerto de juegos |
 | `check-dynarec-hook` | el hook del JIT, compilado contra las fuentes reales del core |
 | `check-sources` | la lista de fuentes de este Makefile frente a la de DOSBox-core |
+| `check-sf2reader` | el lector del `.sf2` que va en el binario, sobre ficheros que escribe el propio test |
 
 `check-dynarec-hook` y `check-sources` necesitan `third_party/dosbox-core`; sin él
 informan **OMITIDO con estado distinto de cero**, a propósito. Un check que no

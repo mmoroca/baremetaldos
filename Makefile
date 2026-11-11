@@ -38,8 +38,8 @@
 # Version stamp.  Printed by "make check" and "make version" so that a support
 # conversation can start with "which snapshot are you running?" instead of
 # guessing.  Bump it whenever the build system changes.
-PROJECT_SNAPSHOT ?= 2026-11-10.78
-PROJECT_SNAPSHOT_DATE ?= 2026-11-10
+PROJECT_SNAPSHOT ?= 2026-11-11.80
+PROJECT_SNAPSHOT_DATE ?= 2026-11-11
 
 # Raspberry Pi model: 3, 4 or 5.  4 is the default because it is the sweet
 # spot for this emulator (AArch64, fast enough for the interpreter core).
@@ -1294,6 +1294,46 @@ check-resample:
 		-o build/resample_test scripts/hostcheck/resample_test.cpp
 	@build/resample_test
 
+# The boot screen, run instead of looked at: the two pinned lines inside their
+# MS-DOS box, the column that flows below them, and the scroll that starts when
+# the column is full.  bare_video.cpp is INCLUDED by the test (not copied), so
+# what runs is the file that ships, and its file-scope state is set up by the
+# test - the frame buffer and the mode are the only things it does not expose.
+# It needs the stand-in Circle headers, which setup.sh (via check-platform)
+# writes; -ffunction-sections + --gc-sections keep the pieces of bare_video the
+# test never calls from dragging in the rest of the port.
+.PHONY: check-status
+check-status:
+	@sh scripts/hostcheck/setup.sh > /dev/null
+	@mkdir -p build
+	@$(HOST_CXX) -std=gnu++23 -O1 -Wall -Wextra -Wpedantic -Werror \
+		-Wno-unused-parameter -ffunction-sections -fdata-sections \
+		-I $(CURDIR)/scripts/hostcheck -I $(CURDIR)/scripts/hostcheck/fatfs \
+		-I $(CURDIR)/src \
+		-include $(CURDIR)/scripts/hostcheck/circle_stdlib_app.h \
+		-DDOSBOX_SNAPSHOT='"$(PROJECT_SNAPSHOT)"' \
+		-o build/status_test scripts/hostcheck/status_test.cpp -Wl,--gc-sections
+	@build/status_test
+
+# The SoundFont block reader, run on the host.
+#
+# .79 changed how the .sf2 is read and the soundfont stopped loading on the
+# board: the failure was in the reading path, and no check in this tree could
+# touch it without flashing a card.  The generator extracts the reader from
+# midi_stub.cpp verbatim - a copy in the test would be a test of the copy - and
+# the test drives it over files it writes itself: every block boundary, reads
+# from 1 byte to 100 KB, skips, one huge read, and a file shorter than it says.
+# What it cannot see is what is below stdio (SD, FatFs, DMA); that is what the
+# offset and the errno on the boot screen are for.
+.PHONY: check-sf2reader
+check-sf2reader:
+	@mkdir -p build
+	@python3 scripts/hostcheck/gen-sf2reader.py build/sf2reader.inc
+	@$(HOST_CXX) -std=gnu++23 -O1 -Wall -Wextra -Wpedantic -Werror \
+		-I build \
+		-o build/sf2reader_test scripts/hostcheck/sf2reader_test.cpp
+	@build/sf2reader_test
+
 .PHONY: check-coreopts
 check-coreopts:
 	@mkdir -p build
@@ -1331,8 +1371,8 @@ check-dynarec-hook:
 # makes failure cheapest to read: the contract, then our kernel, then the
 # config parser.  This is the target to run before a cross build.
 check-host: check-platform check-kernel check-bootconf check-scaling check-dynarec \
-            check-coreopts check-resample check-storage check-governor check-portorder \
-            check-dynarec-hook
+            check-coreopts check-status check-sf2reader check-resample check-storage \
+            check-governor check-portorder check-dynarec-hook
 print-srcs:
 	@echo $(ALL_SRCS)
 

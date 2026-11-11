@@ -397,6 +397,13 @@ void BareSysInfoSetCLIActivity (boolean bActive);
 ///\t   mask, not a level: bit 0 under-voltage now, bit 1 frequency capped now,
 ///\t   bit 2 throttled now, bit 3 soft temperature limit now; bits 16-19 are the
 ///\t   same four as "has happened since boot".
+/// \brief Free RAM available to malloc(), in bytes; 0 means "not known yet".
+///
+/// Used to refuse a SoundFont that cannot fit before TinySoundFont allocates
+/// it: on this platform an exhausted heap panics instead of returning NULL
+/// (see the comment on the definition in bare_sysinfo.cpp).
+u64      BareSysInfoHeapFree (void);
+
 unsigned BareSysInfoFirmwareMode (void);
 
 // ---------------------------------------------------------------------------

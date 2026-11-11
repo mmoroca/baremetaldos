@@ -50,6 +50,7 @@
 #include <circle/bcmpropertytags.h>
 #include <circle/logger.h>
 #include <circle/koptions.h>
+#include <circle/memory.h>
 #include <circle/multicore.h>
 #include <circle/sched/scheduler.h>
 #include <circle/timer.h>
@@ -1006,4 +1007,36 @@ unsigned BareSysInfoThisCore (void)
 	// is always 0, but the panel prints it so that the day a second task is
 	// moved to another core, the number changes by itself.
 	return CMultiCoreSupport::ThisCore ();
+}
+
+u64 BareSysInfoHeapFree (void)
+{
+	// How much RAM is left for malloc(), asked to Circle itself.
+	//
+	// Why the port needs to know: TinySoundFont converts every 16-bit sample to
+	// a float, so a SoundFont costs about twice its own size in RAM before it
+	// can play a note.  And on this platform a malloc() that does not fit is
+	// not a NULL to be handled - Circle sets the low heap up with a 256 KB
+	// reserve (lib/memory.cpp:100, m_HeapLow.Setup (..., 0x40000)) and a
+	// CHeapAllocator with a non-zero reserve PANICS when the heap is full
+	// (include/circle/heapallocator.h, "If nReserve in Setup() is non-zero, the
+	// system panics if heap is full").  So a user who drops a 300 MB SoundFont
+	// on the card would get a boot that stops with no explanation.  With this
+	// number, midi_stub.cpp can refuse the file and say why, and the game still
+	// has its own OPL music.
+	//
+	// HEAP_ANY is the right selector and not an approximation: on a Pi 4
+	// malloc() takes a block from the high heap if it fits there and from the
+	// low heap otherwise, and on a Pi 3 there is only the low heap
+	// (include/circle/memory.h:85-97).  The sum is what is really available.
+	//
+	// 0 means "Circle did not answer" (no memory system yet), and callers must
+	// treat it as "unknown", never as "no memory".
+	CMemorySystem *pMemory = CMemorySystem::Get ();
+	if (pMemory == nullptr)
+	{
+		return 0;
+	}
+
+	return static_cast<u64> (pMemory->GetHeapFreeSpace (HEAP_ANY));
 }
