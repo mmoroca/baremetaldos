@@ -1,0 +1,25 @@
+diff --git a/src/shell/shell_cmds.cpp b/src/shell/shell_cmds.cpp
+index 1526cfd..d566263 100644
+--- a/src/shell/shell_cmds.cpp
++++ b/src/shell/shell_cmds.cpp
+@@ -815,13 +815,17 @@ void DOS_Shell::CMD_COPY(char * args) {
+ 						if (!oldsource.concat || (DOS_OpenFile(nameTarget,OPEN_READWRITE,&targetHandle) && 
+ 					        	                  DOS_SeekFile(targetHandle,&dummy,DOS_SEEK_END))) {
+ 							// Copy 
+-							static Bit8u buffer[0x8000]; // static, otherwise stack overflow possible.
++							// BM-DOS: 0xF000 instead of 0x8000.  The size is a Bit16u in
++							// DOS_ReadFile()/DOS_WriteFile(), so 64 KB is the ceiling; 61440 is
++							// 120 sectors of 512 and 30 of 2048, and it halves the number of
++							// trips to the card, which on this port is what a copy costs.
++							static Bit8u buffer[0xF000]; // static, otherwise stack overflow possible.
+ 							bool	failed = false;
+-							Bit16u	toread = 0x8000;
++							Bit16u	toread = 0xF000;
+ 							do {
+ 								failed |= DOS_ReadFile(sourceHandle,buffer,&toread);
+ 								failed |= DOS_WriteFile(targetHandle,buffer,&toread);
+-							} while (toread==0x8000);
++							} while (toread==0xF000);
+ 							failed |= DOS_CloseFile(sourceHandle);
+ 							failed |= DOS_CloseFile(targetHandle);
+ 							WriteOut(" %s\n",name);

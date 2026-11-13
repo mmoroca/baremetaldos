@@ -1,0 +1,150 @@
+diff --git a/src/dos/cdrom.h b/src/dos/cdrom.h
+index 38a6afa..837933d 100644
+--- a/src/dos/cdrom.h
++++ b/src/dos/cdrom.h
+@@ -196,6 +196,7 @@ public:
+ 	bool	ReadSectors		(PhysPt buffer, bool raw, unsigned long sector, unsigned long num);
+ 	bool	LoadUnloadMedia		(bool unload);
+ 	bool	ReadSector		(Bit8u *buffer, bool raw, unsigned long sector);
++	bool	ReadSectorsHost		(Bit8u *buffer, unsigned long sector, unsigned long num);
+ 	bool	HasDataTrack		(void);
+ 	
+ static	CDROM_Interface_Image* images[26];
+diff --git a/src/dos/cdrom_image.cpp b/src/dos/cdrom_image.cpp
+index 6c887be..5fcb810 100644
+--- a/src/dos/cdrom_image.cpp
++++ b/src/dos/cdrom_image.cpp
+@@ -345,6 +345,38 @@ bool CDROM_Interface_Image::ReadSector(Bit8u *buffer, bool raw, unsigned long se
+ 	return tracks[track].file->read(buffer, seek, length);
+ }
+ 
++// BM-DOS: the contiguous-run read of ReadSectors(), into a host buffer instead of
++// emulated memory.  It exists because of who reads an ISO: "IMGMOUNT -t iso"
++// builds an isoDrive (drive_iso.cpp), and isoFile::Read() went through
++// ReadSector() one 2048-byte sector at a time - one seekg() + one read() on the
++// image file each, 30 of them for a 60 KB COPY.  With this, drive_iso.cpp asks
++// for the whole run in a single read().  Same conditions as ReadSectors(): the
++// run must lie inside one track and the track must store the sector size being
++// asked for, so that the bytes are contiguous in the file.
++bool CDROM_Interface_Image::ReadSectorsHost(Bit8u *buffer, unsigned long sector, unsigned long num)
++{
++	if (num == 0) return true;
++
++	int track = GetTrack(sector);
++	if (track > 0 && track == GetTrack(sector + num - 1)) {
++		Track &t = tracks[track - 1];
++		if (t.sectorSize == COOKED_SECTOR_SIZE) {
++			int seek = t.skip + (sector - t.start) * t.sectorSize;
++			if (t.file->read(buffer, seek, (int)(num * COOKED_SECTOR_SIZE)))
++				return true;
++		}
++	}
++
++	// Not one contiguous run of cooked sectors, or the read failed: fall back to
++	// the per-sector path, which is the one that reports the sector that fails.
++	bool success = true;
++	for (unsigned long i = 0; i < num; i++) {
++		success = ReadSector(&buffer[i * COOKED_SECTOR_SIZE], false, sector + i);
++		if (!success) break;
++	}
++	return success;
++}
++
+ void CDROM_Interface_Image::CDAudioCallBack(Bitu len)
+ {
+ 	len *= 4;       // 16 bit, stereo
+diff --git a/src/dos/drive_iso.cpp b/src/dos/drive_iso.cpp
+index bd24b19..567e325 100644
+--- a/src/dos/drive_iso.cpp
++++ b/src/dos/drive_iso.cpp
+@@ -65,37 +65,43 @@ isoFile::isoFile(isoDrive *drive, const char *name, FileStat_Block *stat, Bit32u
+ bool isoFile::Read(Bit8u *data, Bit16u *size) {
+ 	if (filePos + *size > fileEnd)
+ 		*size = (Bit16u)(fileEnd - filePos);
+-	
++
+ 	Bit16u nowSize = 0;
+-	int sector = filePos / ISO_FRAMESIZE;
+-	Bit16u sectorPos = (Bit16u)(filePos % ISO_FRAMESIZE);
+-	
+-	if (sector != cachedSector) {
+-		if (drive->readSector(buffer, sector)) cachedSector = sector;
+-		else { *size = 0; cachedSector = -1; }
+-	}
+ 	while (nowSize < *size) {
+-		Bit16u remSector = ISO_FRAMESIZE - sectorPos;
++		Bit32u sector = filePos / ISO_FRAMESIZE;
++		Bit16u sectorPos = (Bit16u)(filePos % ISO_FRAMESIZE);
+ 		Bit16u remSize = *size - nowSize;
+-		if(remSector < remSize) {
+-			memcpy(&data[nowSize], &buffer[sectorPos], remSector);
+-			nowSize += remSector;
+-			sectorPos = 0;
+-			sector++;
+-			cachedSector++;
+-			if (!drive->readSector(buffer, sector)) {
++
++		// BM-DOS: whole sectors from a sector boundary go out in ONE read.  This
++		// used to be a readSector() per 2048-byte sector, and each of those is a
++		// seekg() + read() on the image file: a 60 KB COPY from a mounted .iso was
++		// 30 of them per buffer, which is where the time went.  The partial
++		// sectors at either end still go through the single-sector cache below.
++		if (sectorPos == 0 && remSize >= 2 * ISO_FRAMESIZE) {
++			Bit16u num = (Bit16u)(remSize / ISO_FRAMESIZE);
++			if (!drive->readSectors(&data[nowSize], sector, num)) {
+ 				*size = nowSize;
+ 				cachedSector = -1;
++				break;
+ 			}
+-		} else {
+-			memcpy(&data[nowSize], &buffer[sectorPos], remSize);
+-			nowSize += remSize;
++			cachedSector = -1; // the cached sector no longer matches filePos
++			nowSize += (Bit16u)(num * ISO_FRAMESIZE);
++			filePos += num * ISO_FRAMESIZE;
++			continue;
+ 		}
+-			
++
++		if ((int)sector != cachedSector) {
++			if (drive->readSector(buffer, sector)) cachedSector = (int)sector;
++			else { *size = nowSize; cachedSector = -1; break; }
++		}
++		Bit16u remSector = (Bit16u)(ISO_FRAMESIZE - sectorPos);
++		if (remSector > remSize) remSector = remSize;
++		memcpy(&data[nowSize], &buffer[sectorPos], remSector);
++		nowSize += remSector;
++		filePos += remSector;
+ 	}
+-	
++
+ 	*size = nowSize;
+-	filePos += *size;
+ 	return true;
+ }
+ 
+@@ -471,6 +477,12 @@ inline bool isoDrive :: readSector(Bit8u *buffer, Bit32u sector) {
+ 	return CDROM_Interface_Image::images[subUnit]->ReadSector(buffer, false, sector);
+ }
+ 
++// BM-DOS: a whole run of sectors in one call; see ReadSectorsHost() in
++// cdrom_image.cpp.  isoFile::Read() uses it for the whole sectors of a request.
++bool isoDrive :: readSectors(Bit8u *buffer, Bit32u sector, Bit16u num) {
++	return CDROM_Interface_Image::images[subUnit]->ReadSectorsHost(buffer, sector, num);
++}
++
+ int isoDrive :: readDirEntry(isoDirEntry *de, Bit8u *data) {	
+ 	// copy data into isoDirEntry struct, data[0] = length of DirEntry
+ //	if (data[0] > sizeof(isoDirEntry)) return -1;//check disabled as isoDirentry is currently 258 bytes large. So it always fits
+diff --git a/src/dos/drives.h b/src/dos/drives.h
+index 1ccb6cc..24a04ee 100644
+--- a/src/dos/drives.h
++++ b/src/dos/drives.h
+@@ -346,6 +346,7 @@ public:
+ 	virtual bool isRemovable(void);
+ 	virtual Bits UnMount(void);
+ 	bool readSector(Bit8u *buffer, Bit32u sector);
++	bool readSectors(Bit8u *buffer, Bit32u sector, Bit16u num);
+ 	virtual char const* GetLabel(void) {return discLabel;};
+ 	virtual void Activate(void);
+ private:

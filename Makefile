@@ -38,7 +38,7 @@
 # Version stamp.  Printed by "make check" and "make version" so that a support
 # conversation can start with "which snapshot are you running?" instead of
 # guessing.  Bump it whenever the build system changes.
-PROJECT_SNAPSHOT ?= 2026-11-11.80
+PROJECT_SNAPSHOT ?= 2026-11-11.82
 PROJECT_SNAPSHOT_DATE ?= 2026-11-11
 
 # Raspberry Pi model: 3, 4 or 5.  4 is the default because it is the sweet
@@ -56,6 +56,13 @@ DOSBOX_DIR	?= $(CURDIR)/third_party/dosbox-core
 # layer and the minimal libretro.h have to be re-checked against it.
 DOSBOX_REV	?= $(shell cat ./DOSBOX_REV)
 DOSBOX_REPO	?= https://github.com/realnc/dosbox-core.git
+#
+# Nuestros parches a DOSBox-core.  Van aparte de los de Circle (patches/*.patch,
+# que aplica setup.sh) por dos motivos: no son el mismo arbol, y este se clona
+# con "make fetch", no con setup.sh.  Un clon sin ellos compila y arranca, solo
+# que copiar desde una imagen cuesta diez veces mas: por eso fetch los aplica y
+# check-rev dice si estan puestos.
+DOSBOX_PATCHES	:= $(sort $(wildcard $(CURDIR)/patches/dosbox-core/*.patch))
 DOSBOX_BRANCH	?= libretro
 
 # circle-stdlib checkout.  It carries Circle itself as a submodule, plus
@@ -563,6 +570,7 @@ APP_SRCS := \
 	src/platform/bare_thread.cpp \
 	src/platform/bare_time.cpp \
 	src/platform/bare_fs.cpp \
+	src/platform/bare_freespace.cpp \
 	src/platform/bare_sysinfo.cpp \
 	src/platform/bare_dynarec.cpp \
 	src/dosbox-stub/midi_stub.cpp \
@@ -1446,6 +1454,7 @@ deps:
 	@printf "  %-16s %s\n" "toolchain:"   "$(if $(TOOLCHAIN_BIN),$(TOOLCHAIN_BIN),MISSING - expected in $(TOOLCHAIN_DIR)/arm-gnu-toolchain-*/bin)"
 	@printf "  %-16s %s\n" "circle-stdlib:" "$(if $(wildcard $(CIRCLE_STDLIB)/libs/circle/Config.mk),present,MISSING - run ./scripts/setup.sh)"
 	@printf "  %-16s %s\n" "dosbox-core:" "$(if $(wildcard $(DOSBOX_DIR)/src/dosbox.cpp),present,MISSING - run make fetch)"
+	@printf "  %-16s %s\n" "core patches:" "$$(if [ -d $(DOSBOX_DIR)/.git ]; then n=0; a=0; for p in $(DOSBOX_PATCHES); do n=$$((n+1)); git -C $(DOSBOX_DIR) apply --reverse --check "$$p" >/dev/null 2>&1 && a=$$((a+1)); done; echo "$$a of $$n applied"; else echo "not fetched yet"; fi)"
 	@printf "  %-16s %s\n" "build/:"      "$(if $(wildcard build),present,absent)"
 	@echo
 	@echo "  the three of them live inside this project on purpose: nothing is written"
@@ -1462,7 +1471,7 @@ version:
 	@echo "  toolchain:       $$($(if $(TOOLCHAIN_BIN),echo $(TOOLCHAIN_BIN),echo 'not in $(TOOLCHAIN_DIR)'))"
 
 help:
-	@echo "make fetch      clone DOSBox-core at the pinned revision"
+	@echo "make fetch      clone DOSBox-core at the pinned revision + apply our patches"
 	@echo "make check      verify include paths and headers (no build)"
 	@echo "make check-sources  compare our file list with DOSBox-core's (no build)"
 	@echo "make print-srcs     print the files we compile"
@@ -1531,6 +1540,33 @@ fetch:
 		git checkout --quiet $(DOSBOX_REV) && \
 		echo "dosbox-core at $$(git rev-parse --short HEAD)"
 	@echo "pinned revision: $(DOSBOX_REV)"
+	@$(MAKE) --no-print-directory core-patch DOSBOX_DIR="$(DOSBOX_DIR)"
+
+# Our patches to dosbox-core, applied by every build and not only by "make
+# fetch".  This is the difference between a patch that exists and a patch that is
+# in the binary: the user's tree already had third_party/dosbox-core, so a plain
+# "make" would have compiled the core WITHOUT them and nothing would have said
+# so - the same silent difference the patches themselves are meant to remove.
+#
+# Idempotent, in the same way as scripts/setup.sh: ask "is it already there"
+# first, and only then apply.  Silent when there is nothing to do, because it
+# runs on every build.
+.PHONY: core-patch
+core-patch:
+	@if [ ! -d "$(DOSBOX_DIR)/.git" ]; then exit 0; fi; \
+	d="$(DOSBOX_DIR)"; pats="$(DOSBOX_PATCHES)"; \
+	ours=1; for p in $$pats; do \
+		git -C $$d apply --reverse --check "$$p" >/dev/null 2>&1 || ours=0; \
+	done; \
+	want="$$(grep -h '^+++ b/' $$pats | sed 's|^+++ b/||' | sort -u)"; \
+	have="$$(git -C $$d diff --name-only | sort -u)"; \
+	if [ $$ours = 1 ] && [ "$$want" = "$$have" ]; then exit 0; fi; \
+	echo "  dosbox-core is not in the state these patches make: setting it up from the pinned revision"; \
+	git -C $$d checkout -- . || exit 1; \
+	for p in $$pats; do \
+		git -C $$d apply "$$p" || exit 1; \
+		echo "  patched dosbox-core: $$(basename $$p)"; \
+	done
 
 # Quick check that the tree we were given is the revision the port expects.
 check-rev:
@@ -1546,6 +1582,13 @@ check-rev:
 			echo "  actual:   $$(git rev-parse HEAD)"; \
 			echo "  the stub layer and the libretro.h typedefs may need updating"; \
 		fi
+	@for p in $(DOSBOX_PATCHES); do \
+		if git -C $(DOSBOX_DIR) apply --reverse --check "$$p" >/dev/null 2>&1; then \
+			echo "  patch applied: $$(basename $$p)"; \
+		else \
+			echo "  WARNING: patch NOT applied: $$(basename $$p) - run 'make fetch'"; \
+		fi; \
+	done
 
 # "clean" belongs to Circle's Rules.mk (it removes the objects listed in
 # $(EXTRACLEAN), which is why that variable is set above).  What is missing from
@@ -1560,5 +1603,6 @@ distclean:
 # Dependency files written by -MMD.  Guarded: when the administrative goals skip
 # the includes above, $(OBJS) is empty and there is nothing to include anyway.
 ifneq ($(OBJS),)
+$(OBJS): | core-patch
 -include $(OBJS:.o=.d)
 endif
