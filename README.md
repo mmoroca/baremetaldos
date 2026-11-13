@@ -25,6 +25,7 @@ Pi 4 family (including the 400 and the CM4) and the Pi 5.
 - [Configuration: `cmdline.txt`](#configuration-cmdlinetxt)
 - [Configuration: `config.txt` and `dosbox.conf`](#configuration-configtxt-and-dosboxconf)
 - [MIDI with a SoundFont](#midi-with-a-soundfont)
+- [CD and floppy images (`IMGMOUNT`)](#cd-and-floppy-images-imgmount)
 - [Keys](#keys)
 - [The status panel](#the-status-panel)
 - [How it works](#how-it-works)
@@ -59,7 +60,8 @@ What works today:
 | Status panel, screenshots, safe shutdown | works |
 | MIDI with a SoundFont (`.sf2`) over MPU-401 | works |
 | MT-32 / MT-32 ROM | not implemented (no MT-32 emulation on bare metal) |
-| CD-ROM, networking, IPX, modem | not implemented |
+| CD and floppy images on the card (`IMGMOUNT`) | works |
+| Physical CD-ROM drive, networking, IPX, modem | not implemented |
 | Voodoo / 3dfx | not implemented |
 
 The emulated machine is a 486DX2-66 (23880 cycles) unless `dosbox.conf` says
@@ -522,11 +524,19 @@ away from it.
 * **`[cpu] cycles` is what decides whether a game is playable.** There is a full
   table of target values by emulated CPU in the `boot.conf` section above, and
   Ctrl+F11 / Ctrl+F12 change it while the machine runs.
+* **`MOUNT C /dos` reports what is actually left on the card.** `DIR` asks the card
+  through FatFs every time it prints "bytes free", so the number goes down as it fills
+  and `-freesize` is not needed. DOS takes those numbers in 16-bit registers (INT 21h
+  AH=36h), so a card with more than 65535 clusters is described in coarser ones -2 GiB
+  with 4 KB clusters shows as 58254 clusters of 36 KB, and the figure is right to
+  within one of them-; above about 8.5 GB it stops at DOS's own ceiling (65535
+  clusters of 255 sectors). With no card, the old fixed figures stand. `-freesize`
+  and `-size` are untouched and still win: a mount line that carries either of them
+  is never answered by the card.
 * **`core = auto|dynamic|normal`** selects the JIT. `auto` runs the interpreter
   in real mode and switches to the dynamic recompiler in protected mode, which is
   the default and the fastest for most games. `normal` forces the interpreter and
   is useful when comparing behaviour.
-
 ## MIDI with a SoundFont
 
 A DOS game that asks for **General MIDI** on the MPU-401 gets real instruments
@@ -641,6 +651,83 @@ SF2 31559 KB: 3.2 MB/s, 9863 ms SD, 501 ms tsf (plain)
   channels with the SoundFont's banks are handled; there is no GS/XG remapping
   beyond that.
 - **Output to an external MIDI module**: there is no serial or USB MIDI port.
+
+## CD and floppy images (`IMGMOUNT`)
+
+There is no physical CD-ROM drive.  An **image** on the card is mounted by DOSBox
+itself and the game reads it as if it were a disc - ISO9660 for a CD, a raw image
+for a floppy - with DOSBox's own `IMGMOUNT`.
+
+Paths are **host paths from the root of the card**, not DOS paths:
+
+```dos
+IMGMOUNT D /ISO/GAME.ISO -t iso          rem a CD image (ISO9660, or a .cue)
+IMGMOUNT A /IMG/DISK.IMG -t floppy       rem a raw floppy image
+IMGMOUNT -u D                            rem unmount
+```
+
+* `-t iso` for an ISO9660 image or a `.cue`/`.bin` pair - **mount the `.cue`**,
+  not the `.bin`.  `-t floppy` for a raw floppy image (the geometry comes from the
+  file size).  `-t hdd -fs fat` for a hard disk image.
+* The `SD:` prefix works too, but it is Circle's volume name rather than DOSBox
+  syntax; `/ISO/GAME.ISO` is the plain form.
+* A **relative** name is not relative to the card root: dosbox-core tries it
+  first against the directory of the configuration file (`/dosbox/`), so spell the
+  path out.
+* The images must be raw - a `.zip` inside is not an image.
+* A file inside `C:` (that is, under `/dos`) can also be given as `C:\ISO\GAME.ISO`.
+
+Put the lines after `MOUNT C /dos` in `[autoexec]` to have the disc ready at boot.
+
+### What the screen does while a command runs
+
+`COPY`, `IMGMOUNT`, `DELTREE` and the rest of the shell's internal commands are
+**host** code: DOSBox runs them inside the emulated `INT 2Eh`, so the emulated CPU
+does not execute another instruction until they finish.  No emulated frame is
+produced in that time, and after two seconds of that silence this port's watchdog
+takes the display back and prints
+
+```
+STALL: core silent 21280 ms, 0 hand-backs
+STALL: 7297 calls, 7237 frames, 0 dup, 14595 yields
+STALL: 0 boundaries/s of which 0 self-driven
+STALL: max 21258 ms, driving yes, 0 self-driven, audio 8279125/1805258 q/d
+```
+
+That is not a failure, not a reboot and not a memory problem: it is the same
+status screen as during boot, replayed from the log, saying that the emulator has
+not reached a frame boundary.  The first frame after the command finishes hands the
+display back to DOS, so the picture returns by itself.  The first line prints the
+measured silence, so `core silent 4120 ms` is also how long the copy took.
+
+The threshold is **ten seconds**, and it was two.  Two was chosen on the grounds
+that one frame is 16 ms, so two seconds is far above any legitimate gap - and that
+reasoning was wrong, because a shell command *is* such a gap: a copy that took four
+seconds flashed these lines over the last two and took the screen away again before
+they could be read.  Ten seconds is longer than any copy that finishes, and a real
+stall never resumes, so it still gets reported.
+
+Every core call that takes more than 250 ms also leaves a line in the log, which
+`PetSis` shows: `HOST: one core call took 4120 ms`.  A shell command is exactly one
+call, so that number is the duration of the whole command - and it is the only
+clock a copy has, because DOS's own clock does not advance while the emulator is
+stopped.  It is what to quote when a copy feels slow: the line, plus the size of
+the file, is a speed.
+
+Copying from a CD image is the slowest thing the machine does, and it is slow in a
+predictable way: reading the image was one seek plus one 2048-byte read **per CD
+sector**, so a 32 KB copy cost sixteen of each, and smaller reads cost
+proportionally more.  Read size is the lever - measured on the board, the same
+31 MB SoundFont reads at 8.4 MB/s in 64 KB blocks and 3.2 MB/s in 4 KB ones.  Three
+patches to dosbox-core bring that lever to `COPY` and to the image reader itself
+(see [Patches to third-party code](#patches-to-third-party-code)).  The copy is
+done when the prompt comes back and DOS has printed the file name.
+
+Note for the impatient: a **small** file copied from an image is dominated by
+per-file work, not by the size of the data - creating the file, one FAT update and
+one directory update on the card are three SD commands whatever the file weighs.
+That is why an installer writing large files feels fast and a hundred 4 KB files do
+not.
 
 ## Keys
 
@@ -858,7 +945,8 @@ scripts/                  setup, build, card writing, host checks
   make-sd.sh              one board's card, from nothing (destructive)
   update-sd.sh            a card that already works (never deletes)
 sd/                       the files that go on the card, as they ship
-patches/                  fixes for upstream code, applied by scripts/setup.sh
+patches/                  fixes for upstream code: *.patch (Circle, applied by
+                          scripts/setup.sh), dosbox-core/ (applied by make fetch)
 ```
 
 `third_party/`, `build/`, `opt/` and `sdcard/` are generated and are in
@@ -990,17 +1078,30 @@ less: it starts at 80 C, and `socmaxtemp=` in `cmdline.txt` can only *lower* tha
 gap between the governor's levels, which makes the fault easier to see but does
 not fix it.
 
-### Circle patches
+### Patches to third-party code
 
-`patches/` holds fixes for upstream code, and **they are applied automatically**
-by `scripts/setup.sh`, which is the step that clones and configures
-circle-stdlib. Applying a patch twice is not an error: the script asks
-`git apply --reverse --check` first and skips what is already in the tree, so
-re-running `setup.sh` on an existing checkout is safe.
+`patches/` holds fixes for upstream code, in **two sets**, because the two trees
+are fetched by different steps and each set is applied by the step that owns it:
+
+| Set | Tree | Applied by |
+|---|---|---|
+| `patches/*.patch` | Circle (inside circle-stdlib) | `scripts/setup.sh` |
+| `patches/dosbox-core/*.patch` | dosbox-core | `make fetch` |
+
+**Both are applied automatically**, and applying a patch twice is not an error:
+each step asks `git apply --reverse --check` first and skips what is already in
+the tree, so re-running `setup.sh` or `make fetch` on an existing checkout is
+safe.  `make check-rev` prints the pinned revision and says of each dosbox-core
+patch whether it is in place, which is the quickest way to see that a tree is
+complete.
 
 That changed on purpose. Until .74 this section said "applied by hand", with the
 commands below, and the consequence was that a `git clone` followed by a plain
-`make` produced a kernel that stops on a Pi 3 - and nothing said why.
+`make` produced a kernel that stops on a Pi 3 - and nothing said why.  The
+dosbox-core set is wired the same way for the same reason: at the pinned revision
+without those patches the tree builds and boots normally, only with `COPY` far
+slower than it has any right to be, and that is the kind of silent difference
+this project does not want to have.
 
 `patches/circle-rpi3-usbstring.patch` fixes a Circle abort on the Pi 3. On a Pi 3
 `CUSBString::GetFromDescriptor()` asks for a 4-byte string descriptor, and a USB
@@ -1023,6 +1124,34 @@ The patch applies to Circle Step51.1.1, the revision circle-stdlib carries at th
 time of writing. If Circle moves and a patch no longer fits, `setup.sh` stops
 with the exact `git apply --check` command to run, instead of building a kernel
 that is missing the fix.
+
+The dosbox-core set is four patches: three about the cost of one byte copied, and
+one about a number DOS reads.
+
+* `0001-imgmount-read-contiguous-sectors.patch` - `CDROM_Interface_Image::ReadSectors()`
+  asked the image for one sector at a time: `seek` + `read` of `sectorSize` bytes,
+  once per sector, so a 32 KB read meant sixteen of each.  The patch asks once for
+  the whole run when the run lies inside a single track and the caller wants the
+  same sector size the track stores, and falls back to the sector loop (which is
+  the one that names the bad sector in its error message) if the single read
+  fails.  It does not help a `.bin` mounted and read as *cooked* data, whose
+  payload is interrupted by sync and ECC bytes.
+* `0002-shell-copy-64k-buffer.patch` - `COPY`'s own buffer goes from `0x8000` to
+  `0xF000` (61440 bytes).  It cannot go further: DOSBox passes the length of a
+  read or write in a 16-bit field, so 64 KB is a hard ceiling and 60 KB leaves the
+  remainder of an odd file size to a normal short read.
+* `0003-drive-iso-read-runs.patch` - the one that matters for `IMGMOUNT -t iso`.
+  That mount does **not** read through `ReadSectors()`: it builds an `isoDrive`
+  (`src/dos/drive_iso.cpp`) and reads each file through `ReadSector()`, one
+  2048-byte sector at a time - one `seekg()` plus one `read()` on the image file
+  each, thirty of them for one 60 KB buffer.  `0001` covers the CD-device path
+  (`-t cdrom`); this one gives `isoFile::Read()` a whole run of sectors in one
+  read, with the partial sectors at either end still going through the
+  single-sector cache.
+
+The three patches change how many times the image is asked for the bytes in between;
+the fourth changes a number DOS reads. None of them changes what DOS sees
+otherwise: same directory, same files, same error messages.
 
 ## Acknowledgements
 

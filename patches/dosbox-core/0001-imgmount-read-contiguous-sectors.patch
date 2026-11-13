@@ -1,0 +1,35 @@
+diff --git a/src/dos/cdrom_image.cpp b/src/dos/cdrom_image.cpp
+index 05c7575..6c887be 100644
+--- a/src/dos/cdrom_image.cpp
++++ b/src/dos/cdrom_image.cpp
+@@ -277,6 +277,30 @@ bool CDROM_Interface_Image::ReadSectors(PhysPt buffer, bool raw, unsigned long s
+ 	Bit8u* buf = new Bit8u[buflen];
+ 	
+ 	bool success = true; //Gobliiins reads 0 sectors
++
++	// BM-DOS: one read instead of num seeks.  When the whole range falls inside a
++	// single track and the file's sector size is the one being asked for, the
++	// sectors are contiguous in the file, so the payload can be read in one go.
++	// Before this, every 2048-byte sector cost a seekg() + read() of its own:
++	// copying 32 KB from a mounted .iso was 16 seeks and 16 reads, which is what
++	// made COPY from a CD slow on the bare metal port.
++	// A .bin (2352-byte sectors) asked for cooked sectors does not qualify: there
++	// the 2048-byte payload of each sector is separated by sync and ECC, so those
++	// keep going through the per-sector loop.  If the batch read fails it also
++	// falls through to the loop, which is what reports the failing sector.
++	int batchTrack = (num > 0) ? GetTrack(sector) : -1;
++	if (batchTrack > 0 && batchTrack == GetTrack(sector + num - 1)) {
++		Track &t = tracks[batchTrack - 1];
++		if (t.sectorSize == sectorSize) {
++			int seek = t.skip + (sector - t.start) * t.sectorSize;
++			if (t.file->read(buf, seek, (int)buflen)) {
++				MEM_BlockWrite(buffer, buf, buflen);
++				delete[] buf;
++				return true;
++			}
++		}
++	}
++
+ 	for(unsigned long i = 0; i < num; i++) {
+ 		success = ReadSector(&buf[i * sectorSize], raw, sector + i);
+ 		if (!success) break;

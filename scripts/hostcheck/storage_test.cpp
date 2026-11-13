@@ -43,6 +43,7 @@
 #include <cstring>
 
 #include "bare_storage.h"
+#include "bare_space.h"
 
 namespace bare_storage
 {
@@ -252,6 +253,65 @@ static void TestMessages (void)
 		"sin tarjeta no se anuncia un fallo");
 }
 
+// ---------------------------------------------------------------------------
+// El espacio libre que DOS ve en C: (ver bare_space.h)
+// ---------------------------------------------------------------------------
+// El número no es libre de elegir: DOS lo recibe en cuatro registros de 16 bits
+// (INT 21h AH=36h) y CMD_DIR multiplica tres de ellos.  Lo que se comprueba aquí
+// es la conversión de la geometría de FatFs a esa forma, con las tarjetas que hay
+// de verdad.  Es lo único de esta función que se puede mirar sin una tarjeta:
+// quien la lee -bare_freespace.cpp- sólo existe en la placa.
+static void TestFreeSpace (void)
+{
+	TBareDosSpace Space = {};
+
+	// 250 MB, 4 KB de clúster: cabe sin tocar nada.  64000 clústeres, los cuatro
+	// números tal cual, y DIR imprimiría 250 MB.
+	const unsigned nBlocks250MB = 250u * 1024u * 1024u / 4096u;	// 64000
+	Expect (BareMapFatFsSpace (512, 8, nBlocks250MB + 2, nBlocks250MB, &Space),
+		"250 MB: se puede describir");
+	Expect (Space.nSectorsPerCluster == 8 && Space.nTotalClusters == 64000 &&
+		Space.nFreeClusters == 64000 && Space.nBytesPerSector == 512,
+		"250 MB: 64000 clústeres de 8 sectores, sin escalar");
+
+	// 2 GiB con clústeres de 4 KB: 524288 clústeres no caben en 16 bits, así que
+	// la tarjeta se describe con clústeres 9 veces más gruesos (72 sectores) y
+	// 58254 clústeres.  Es lo que hace un FORMAT de verdad.
+	const unsigned nBlocks2GB = 2u * 1024u * 1024u * 1024u / 4096u;	// 524288
+	Expect (BareMapFatFsSpace (512, 8, nBlocks2GB + 2, nBlocks2GB / 2, &Space),
+		"2 GiB: se puede describir");
+	Expect (Space.nSectorsPerCluster == 72 && Space.nTotalClusters == 58254,
+		"2 GiB: 58254 clústeres de 72 sectores");
+	Expect (Space.nFreeClusters == 29127,
+		"2 GiB: la mitad libre son 29127 clústeres");
+	Expect ((unsigned long) Space.nBytesPerSector * Space.nSectorsPerCluster *
+		Space.nFreeClusters == 1073737728ul,
+		"2 GiB: y DIR imprime 1 073 737 728 bytes libres");
+
+	// 32 GB con clústeres de 32 KB: ni con 255 sectores por clúster se puede
+	// decir la verdad, porque DOS no tiene más.  La cifra se queda en el techo en
+	// vez de mentir hacia arriba o desbordar.
+	const unsigned nBlocks32GB = 1024u * 1024u;	// 32 GB / 32 KB = 1048576, sin desbordar
+	Expect (BareMapFatFsSpace (512, 64, nBlocks32GB + 2, nBlocks32GB, &Space),
+		"32 GB: se puede describir");
+	Expect (Space.nSectorsPerCluster == 255 && Space.nTotalClusters == 65535,
+		"32 GB: tope de 255 sectores y 65535 clústeres");
+
+	// Un FSInfo viejo puede decir más libre del que hay: no se le cree.
+	Expect (BareMapFatFsSpace (512, 8, 1002, 5000, &Space) && Space.nFreeClusters == 1000,
+		"más libres que clústeres: se recorta al total");
+
+	// Sin geometría no hay respuesta, y el núcleo se queda con la línea de montaje.
+	Expect (!BareMapFatFsSpace (0, 8, 1002, 500, &Space),
+		"tamaño de sector cero: no se contesta");
+	Expect (!BareMapFatFsSpace (512, 0, 1002, 500, &Space),
+		"clúster de cero sectores: no se contesta");
+	Expect (!BareMapFatFsSpace (512, 8, 2, 0, &Space),
+		"volumen sin clústeres: no se contesta");
+	Expect (!BareMapFatFsSpace (512, 8, 1002, 500, nullptr),
+		"sin dónde dejarlo: no se contesta");
+}
+
 int main (void)
 {
 	TestHappyPath ();
@@ -260,6 +320,7 @@ int main (void)
 	TestSyncFails ();
 	TestProbePath ();
 	TestMessages ();
+	TestFreeSpace ();
 
 	printf ("\n");
 	if (s_nFailures != 0)

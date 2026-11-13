@@ -924,12 +924,37 @@ CStdlibApp::TShutdownMode CKernel::Run (void)
 	// Watchdog state.  The emulator stopping silently is the failure mode this
 	// port keeps running into, so the frame loop keeps its own account of what
 	// it can *measure*, not of what it has drawn: frames presented, audio
-	// queued and dropped, and how long retro_run itself took.  Two seconds is
-	// far above any legitimate gap (one frame is 16 ms) and it reports at most
-	// once a second, so a stall cannot flood the display.
-	const u64 nStallMicros = 2000000;
+	// queued and dropped, and how long retro_run itself took.  It reports at
+	// most once a second, so a stall cannot flood the display.
+	//
+	// Ten seconds, not two.  Two was chosen saying "far above any legitimate
+	// gap (one frame is 16 ms)", and that sentence was wrong about which gaps
+	// are legitimate: the shell's own commands (COPY, IMGMOUNT, DELTREE...) are
+	// host code that DOSBox runs inside the emulated INT 2Eh (dosbox-core
+	// shell.cpp, INT2E_Handler), so the emulated CPU executes nothing until they
+	// finish and no frame boundary happens in between.  A COPY that took four
+	// seconds therefore took the screen away for the last two of them, printed
+	// four lines about a "stall" that was not one, and gave the picture back -
+	// a flicker that says nothing and cannot even be read.  Ten seconds leaves
+	// ordinary copies alone and is still impossible to miss when the emulator
+	// really has died, because that one never resumes.  It is one constant if
+	// this ever needs to be different.
+	const u64 nStallMicros = 10000000;
 	u64 nLastReportMicros = 0;
 	u64 nMaxCallMicros = 0;
+
+	// One core call that takes hundreds of milliseconds is a host command, not a
+	// slow frame: the shell's own commands (COPY, IMGMOUNT, DELTREE...) run
+	// inside the emulated INT 2Eh, so a whole copy is one retro_run() and no
+	// emulated time passes while it does (AGENTS.md, "STALL").  Printing it well
+	// below the watchdog's ten seconds is what turns "copying is slow" into a
+	// number, which is the only clock a copy has: DOS's own clock does not move.
+	//
+	// 250 ms is fifteen frames' worth; anything under that is the machine being
+	// itself.  At most one line a second, because a log that floods is a log
+	// nobody reads.
+	const u64 nSlowCallMicros = 250000;
+	u64 nLastSlowReportMicros = 0;
 	u64 nLastPanelMicros = 0;
 
 	// Real time.  This loop is what paces the emulator: the audio path no
@@ -1121,6 +1146,12 @@ CStdlibApp::TShutdownMode CKernel::Run (void)
 		if (nCallMicros > nMaxCallMicros)
 		{
 			nMaxCallMicros = nCallMicros;
+		}
+
+		if (nCallMicros > nSlowCallMicros && nNow - nLastSlowReportMicros > 1000000)
+		{
+			nLastSlowReportMicros = nNow;
+			Report ("HOST: one core call took %llu ms", nCallMicros / 1000);
 		}
 
 		nFrames++;

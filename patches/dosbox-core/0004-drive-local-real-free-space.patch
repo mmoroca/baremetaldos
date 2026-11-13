@@ -1,0 +1,98 @@
+diff --git a/src/dos/dos_programs.cpp b/src/dos/dos_programs.cpp
+index 202d3eae..fc4c5dd0 100644
+--- a/src/dos/dos_programs.cpp
++++ b/src/dos/dos_programs.cpp
+@@ -241,7 +241,12 @@ public:
+ 			}
+ 			/* Parse the free space in mb's (kb's for floppies) */
+ 			std::string mb_size;
+-			if(cmd->FindString("-freesize",mb_size,true)) {
++			// BM-DOS: whether the mount line pinned the free space itself.  Both switches
++			// are still read and consumed exactly as before; this only remembers that they
++			// were there, so a plain "MOUNT C /dos" can ask the port for the card's own
++			// numbers while "-freesize" and "-size" keep meaning what they always meant.
++			const bool bFreesizeGiven = cmd->FindString("-freesize",mb_size,true);
++			if(bFreesizeGiven) {
+ 				char teststr[1024];
+ 				Bit16u freesize = static_cast<Bit16u>(atoi(mb_size.c_str()));
+ 				if (type=="floppy") {
+@@ -258,7 +263,10 @@ public:
+ 				str_size=teststr;
+ 			}
+ 		   
+-			cmd->FindString("-size",str_size,true);
++			const bool bSizeGiven = cmd->FindString("-size",str_size,true);
++			// Only a plain directory mount can be answered by the port: a floppy, an
++			// ISO/CD or an overlay is not the card and must not be described as it.
++			const bool bAskPort = (type=="dir") && !bFreesizeGiven && !bSizeGiven;
+ 			char number[21] = { 0 };const char * scan = str_size.c_str();
+ 			Bitu index = 0;Bitu count = 0;
+ 			/* Parse the str_size string */
+@@ -468,6 +476,7 @@ public:
+ 					}
+ 				} else {
+ 					newdrive = new localDrive(temp_line.c_str(),sizes[0],bit8size,sizes[2],sizes[3],mediaid);
++					static_cast<localDrive *>(newdrive)->SetSpaceFromPort(bAskPort);
+ 				}
+ 			}
+ 		} else {
+diff --git a/src/dos/drive_local.cpp b/src/dos/drive_local.cpp
+index 44396d7e..fb3f6727 100644
+--- a/src/dos/drive_local.cpp
++++ b/src/dos/drive_local.cpp
+@@ -373,7 +373,30 @@ bool localDrive::Rename(char * oldname,char * newname) {
+ 
+ }
+ 
++// BM-DOS: where the free-space figures come from.
++//
++// Without this, MOUNT of a directory builds the drive with the geometry written in
++// dos_programs.cpp ("512,32,32765,16000": 16 KB clusters, 16000 free clusters =
++// 262,144,000 bytes free) and this function repeats it for ever, so DIR prints the
++// same figure on an empty card and on a full one.
++//
++// Nothing in the core can ask a host filesystem how much room is left, and the port
++// can.  It is asked only when MOUNT did not pin the numbers itself (SetSpaceFromPort),
++// so -freesize and -size go on doing exactly what they did, and when the port has no
++// answer -no card- the four numbers of the mount line stand.
++extern "C" bool bare_storage_dos_space(unsigned int *pBytesPerSector,unsigned int *pSectorsPerCluster,unsigned int *pTotalClusters,unsigned int *pFreeClusters);
++
+ bool localDrive::AllocationInfo(Bit16u * _bytes_sector,Bit8u * _sectors_cluster,Bit16u * _total_clusters,Bit16u * _free_clusters) {
++	if (bSpaceFromPort) {
++		unsigned int nBytesPerSector=0,nSectorsPerCluster=0,nTotalClusters=0,nFreeClusters=0;
++		if (bare_storage_dos_space(&nBytesPerSector,&nSectorsPerCluster,&nTotalClusters,&nFreeClusters)) {
++			*_bytes_sector=(Bit16u)nBytesPerSector;
++			*_sectors_cluster=(Bit8u)nSectorsPerCluster;
++			*_total_clusters=(Bit16u)nTotalClusters;
++			*_free_clusters=(Bit16u)nFreeClusters;
++			return true;
++		}
++	}
+ 	*_bytes_sector=allocation.bytes_sector;
+ 	*_sectors_cluster=allocation.sectors_cluster;
+ 	*_total_clusters=allocation.total_clusters;
+diff --git a/src/dos/drives.h b/src/dos/drives.h
+index 24a04eef..7515dfa4 100644
+--- a/src/dos/drives.h
++++ b/src/dos/drives.h
+@@ -72,6 +72,12 @@ public:
+ 	virtual bool isRemovable(void);
+ 	virtual Bits UnMount(void);
+ 	const char* getBasedir() {return basedir;};
++	// BM-DOS: the host port knows how much room the real filesystem has, and this
++	// drive does not.  MOUNT says so only for a plain directory mount that did not
++	// pin the numbers itself with -freesize or -size: those two keep working and
++	// keep meaning exactly what they meant, and floppies, ISO/CD drives and
++	// overlays never ask.
++	void SetSpaceFromPort(bool bAsk) { bSpaceFromPort = bAsk; }
+ protected:
+ 	char basedir[CROSS_LEN];
+ private:
+@@ -89,6 +95,7 @@ private:
+ 		Bit16u free_clusters;
+ 		Bit8u mediaid;
+ 	} allocation;
++	bool bSpaceFromPort = false;	// see SetSpaceFromPort()
+ };
+ 
+ #ifdef _MSC_VER
